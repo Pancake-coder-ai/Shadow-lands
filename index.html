@@ -1,0 +1,1878 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+ <link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0b0e14">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Shadow Lands</title>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+<style>
+  html, body { margin:0; padding:0; background:#0b0e14; overflow:hidden; height:100%; touch-action:none; }
+  canvas { display:block; margin:auto; }
+    #rotate { position:fixed; inset:0; background:#0b0e14; z-index:99998;
+    display:none; flex-direction:column; align-items:center; justify-content:center;
+    color:#ffd34d; font:bold 20px sans-serif; text-align:center; }
+  #rotate .arrow { font-size:60px; animation:spin 1.6s ease-in-out infinite; }
+  @keyframes spin { 0%,100% { transform:rotate(0deg);} 50% { transform:rotate(90deg);} }
+  @media (orientation: portrait) { #rotate { display:flex; } }
+</style>
+</head>
+<body>
+  <div id="rotate"><div class="arrow">&#8635;</div><div>ПОВЕРНИ УСТРОЙСТВО<br>ГОРИЗОНТАЛЬНО</div></div>
+<script>
+// --- ЛОВЕЦ ОШИБОК (отладка) ---
+window.onerror = function (msg, src, line, col) {
+  let box = document.getElementById('errbox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'errbox';
+    box.style.cssText = 'position:fixed;left:0;right:0;top:0;background:#a00;color:#fff;font:13px monospace;padding:10px;z-index:99999;white-space:pre-wrap;';
+    document.body.appendChild(box);
+  }
+  box.textContent = 'ОШИБКА: ' + msg + '\nСтрока: ' + line + ':' + col;
+  return false;
+};
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+// ======================== ДАННЫЕ ========================
+const SAVE_KEY = 'sl_save1';
+
+const RARITIES = [
+  { name:'Обычный',     color:0xc7c7c7, css:'#c7c7c7', w:55, bonus:0 },
+  { name:'Необычный',   color:0x5fd35f, css:'#5fd35f', w:25, bonus:1 },
+  { name:'Редкий',      color:0x4da3ff, css:'#4da3ff', w:12, bonus:2 },
+  { name:'Эпический',   color:0xb26bff, css:'#b26bff', w:6,  bonus:3 },
+  { name:'Легендарный', color:0xffa23e, css:'#ffa23e', w:2,  bonus:4 },
+];
+
+const WEAPON_NAMES = [
+  ['Ржавый клинок', 'Старая сабля', 'Кривой нож'],
+  ['Солдатский меч', 'Топор ополченца', 'Копьё стражника'],
+  ['Клинок тени', 'Стальной клык', 'Молот рассвета'],
+  ['Гроза падших', 'Клык пустоты', 'Пепельный клинок'],
+  ['Эхо вечности', 'Сердце бури', 'Клинок тысячи лун'],
+];
+
+function genWeapon(lvl, minR) {
+  let roll = Math.random() * 100, acc = 0, ri = 0;
+  for (let i = 0; i < RARITIES.length; i++) {
+    acc += RARITIES[i].w;
+    if (roll < acc) { ri = i; break; }
+  }
+  if (minR != null && ri < minR) ri = minR;
+  const names = WEAPON_NAMES[ri];
+  return {
+    name: names[Math.floor(Math.random() * names.length)],
+    dmg: 3 + lvl * 2 + Phaser.Math.Between(0, 3) + RARITIES[ri].bonus * 3,
+    r: ri
+  };
+}
+
+function loadSave() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SAVE_KEY));
+    return (s && s.lvl) ? s : null;
+  } catch (e) { return null; }
+}
+
+// ======================== ЗВУКИ ========================
+const SoundFX = {
+  ctx: null, master: null, noiseBuf: null, musicOsc: null,
+  muted: (function () { try { return localStorage.getItem('sl_muted') === '1'; } catch (e) { return false; } })(),
+
+  ensure() {
+    if (this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.muted ? 0 : 0.5;
+    this.master.connect(this.ctx.destination);
+    const len = this.ctx.sampleRate;
+    this.noiseBuf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = this.noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  },
+
+  setMuted(m) {
+    this.muted = m;
+    try { localStorage.setItem('sl_muted', m ? '1' : '0'); } catch (e) {}
+    if (this.master) this.master.gain.value = m ? 0 : 0.5;
+  },
+
+  unlock() {
+    this.ensure();
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+    this.startMusic();
+  },
+
+  tone(freq, dur, type, vol, freqEnd, delay) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime + (delay || 0);
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, t);
+    if (freqEnd) o.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t + dur);
+    g.gain.setValueAtTime(vol || 0.2, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t + dur);
+  },
+
+  noise(dur, vol, filterFreq, delay) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime + (delay || 0);
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuf; src.loop = true;
+    const f = this.ctx.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = filterFreq || 1000;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol || 0.2, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t); src.stop(t + dur);
+  },
+
+  swing()    { this.noise(0.07, 0.13, 1600); },
+  hit()      { this.noise(0.09, 0.3, 700); this.tone(160, 0.1, 'square', 0.12, 70); },
+  dash()     { this.noise(0.15, 0.12, 2400); },
+  hurt()     { this.tone(190, 0.25, 'sawtooth', 0.2, 80); },
+  kill()     { this.noise(0.18, 0.22, 500); this.tone(220, 0.18, 'square', 0.14, 45); },
+  pickup()   { this.tone(520, 0.08, 'sine', 0.16); this.tone(780, 0.1, 'sine', 0.16, null, 0.07); },
+  levelup()  { this.tone(440, 0.1, 'square', 0.15); this.tone(554, 0.1, 'square', 0.15, null, 0.09); this.tone(659, 0.16, 'square', 0.15, null, 0.18); },
+  whirl()    { this.noise(0.3, 0.2, 900); this.tone(120, 0.28, 'sawtooth', 0.12, 40); },
+  wave()     { this.noise(0.25, 0.25, 600); this.tone(90, 0.3, 'sawtooth', 0.15, 180); },
+  shout()    { this.tone(140, 0.4, 'sawtooth', 0.22, 320); },
+  potion()   { this.tone(700, 0.2, 'sine', 0.14, 1100); },
+  buy()      { this.tone(880, 0.06, 'square', 0.14); this.tone(1174, 0.12, 'square', 0.14, null, 0.06); },
+  bossRoar() { this.tone(90, 0.7, 'sawtooth', 0.3, 35); this.noise(0.5, 0.2, 300); },
+  eliteDie() { this.tone(330, 0.12, 'square', 0.16, 660); this.noise(0.2, 0.22, 600); },
+  spit()     { this.tone(300, 0.15, 'sawtooth', 0.12, 120); },
+  portal()   { this.tone(220, 0.5, 'sine', 0.16, 660); },
+  gameover() { this.tone(300, 0.4, 'sawtooth', 0.2, 150, 0); this.tone(200, 0.6, 'sawtooth', 0.2, 80, 0.3); },
+
+  startMusic() {
+    if (this.musicOsc || !this.ctx) return;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    const lfo = this.ctx.createOscillator(), lg = this.ctx.createGain();
+    o.type = 'sawtooth'; o.frequency.value = 55;
+    g.gain.value = 0.035;
+    lfo.frequency.value = 0.08; lg.gain.value = 0.02;
+    lfo.connect(lg); lg.connect(g.gain);
+    o.connect(g); g.connect(this.master);
+    o.start(); lfo.start();
+    this.musicOsc = o;
+  }
+};
+// ======================== ЭКРАН И ЗВУК ПРИ СВОРАЧИВАНИИ ========================
+function goFullscreen() {
+  try {
+    const el = document.documentElement;
+    let p = null;
+    if (el.requestFullscreen) p = el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) p = el.webkitRequestFullscreen();
+    if (p && p.then) {
+      p.then(() => {
+        if (screen.orientation && screen.orientation.lock) {
+          screen.orientation.lock('landscape').catch(() => {});
+        }
+      }).catch(() => {});
+    }
+  } catch (e) {}
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!SoundFX.ctx) return;
+  if (document.hidden) {
+    if (SoundFX.ctx.state === 'running') SoundFX.ctx.suspend();
+  } else {
+    if (SoundFX.ctx.state === 'suspended') SoundFX.ctx.resume();
+  }
+});
+window.addEventListener('blur', () => {
+  if (SoundFX.ctx && SoundFX.ctx.state === 'running') SoundFX.ctx.suspend();
+});
+window.addEventListener('focus', () => {
+  if (SoundFX.ctx && SoundFX.ctx.state === 'suspended' && !document.hidden) SoundFX.ctx.resume();
+});
+// ======================== ИГРОК ========================
+class Player {
+  constructor(scene, x, y, save) {
+    this.scene = scene;
+    this.sprite = scene.physics.add.sprite(x, y, 'player');
+    this.sprite.setCollideWorldBounds(true);
+    this.sprite.body.setSize(24, 24).setOffset(4, 4);
+
+    this.speed = 230;
+    this.lvl = 1; this.xp = 0; this.xpNext = 40;
+    this.maxHp = 100; this.baseAttack = 8;
+    this.weapon = { name: 'Старый меч', dmg: 4, r: 0 };
+    this.potions = 2;
+    if (save) {
+      this.lvl = save.lvl; this.xp = save.xp; this.xpNext = save.xpNext;
+      this.maxHp = save.maxHp; this.baseAttack = save.baseAttack;
+      this.weapon = save.weapon;
+      if (save.potions != null) this.potions = save.potions;
+    }
+    this.hp = this.maxHp;
+
+    this.attackCd = 0; this.dashCd = 0; this.potCd = 0; this.invulnUntil = 0;
+    this.acidTickCd = 0;
+    this.isDashing = false;
+    this.facing = new Phaser.Math.Vector2(1, 0);
+  }
+
+  totalDamage() { return this.baseAttack + this.weapon.dmg; }
+
+  addXp(n) {
+    this.xp += n;
+    while (this.xp >= this.xpNext) {
+      this.xp -= this.xpNext;
+      this.levelUp();
+    }
+    this.scene.refreshHud();
+  }
+
+  levelUp() {
+    this.lvl++;
+    this.xpNext = 40 + (this.lvl - 1) * 35;
+    this.maxHp += 12;
+    this.baseAttack += 3;
+    this.hp = Math.min(this.maxHp, this.hp + Math.round(this.maxHp * 0.4));
+    const s = this.scene;
+    s.cameras.main.flash(220, 255, 215, 77);
+    SoundFX.levelup();
+    s.showBanner(`УРОВЕНЬ ${this.lvl}!`, '#ffd34d', 30);
+    s.spawnDamageText(this.sprite.x, this.sprite.y - 42, '+HP  +Урон', '#7dff8a');
+    s.burst(this.sprite.x, this.sprite.y, 0xffd34d, 16);
+    for (const a of s.abilities) {
+      if (a.unlock === this.lvl) s.showBanner(`Новое умение: ${a.fullName}!`, a.css, 20, 125);
+    }
+    s.saveGame();
+  }
+
+  tryPotion(time) {
+    if (time < this.potCd) return;
+    if (this.potions <= 0) {
+      this.scene.spawnDamageText(this.sprite.x, this.sprite.y - 30, 'Нет зелий!', '#8a93a3');
+      this.potCd = time + 400; return;
+    }
+    if (this.hp >= this.maxHp) {
+      this.scene.spawnDamageText(this.sprite.x, this.sprite.y - 30, 'HP полон', '#8a93a3');
+      this.potCd = time + 400; return;
+    }
+    this.potCd = time + 800;
+    this.potions--;
+    SoundFX.potion();
+    const heal = Math.round(this.maxHp * 0.4);
+    this.hp = Math.min(this.maxHp, this.hp + heal);
+    this.sprite.setTint(0x7dff8a);
+    this.scene.burst(this.sprite.x, this.sprite.y, 0x7dff8a, 8);
+    this.scene.time.delayedCall(120, () => this.sprite.clearTint());
+    this.scene.spawnDamageText(this.sprite.x, this.sprite.y - 30, `+${heal}`, '#7dff8a');
+    this.scene.refreshHud();
+    this.scene.saveGame();
+  }
+
+  update(time, delta, input) {
+    if (this.isDashing) return;
+    const v = new Phaser.Math.Vector2(input.x, input.y);
+    if (v.lengthSq() > 1) v.normalize();
+    if (v.lengthSq() > 0.0025) {
+      this.facing.copy(v).normalize();
+      this.sprite.setRotation(this.facing.angle());
+    }
+    this.sprite.setVelocity(v.x * this.speed, v.y * this.speed);
+    if (input.attack) this.tryAttack(time);
+    if (input.dash) {
+      const dir = v.lengthSq() > 0.0025 ? v.clone().normalize() : this.facing.clone();
+      this.tryDash(time, dir);
+    }
+    // кислотные лужи
+    if (time > this.acidTickCd) {
+      for (const pl of this.scene.acidPools.getChildren()) {
+        if (!pl.active || pl.hp === undefined) continue;
+        if (Phaser.Math.Distance.Between(this.sprite.x, this.sprite.y, pl.x, pl.y) < pl.radius * pl.scale) {
+          this.takeDamage(pl.dmg);
+          this.acidTickCd = time + 450;
+          break;
+        }
+      }
+    }
+  }
+
+  tryAttack(time) {
+    if (time < this.attackCd) return;
+    this.attackCd = time + 350;
+    const s = this.sprite;
+    SoundFX.swing();
+    const arc = this.scene.add.arc(
+      s.x + this.facing.x * 34, s.y + this.facing.y * 34,
+      36, -60, 60, false, 0xffffff, 0.4
+    );
+    arc.setRotation(this.facing.angle()).setDepth(30);
+    this.scene.tweens.add({ targets: arc, alpha: 0, scale: 1.5, duration: 170, onComplete: () => arc.destroy() });
+
+    const reach = 80, minDot = Math.cos(Phaser.Math.DegToRad(65));
+    const dmg = this.totalDamage();
+    for (const e of this.scene.enemies) {
+      if (e.dead) continue;
+      const to = new Phaser.Math.Vector2(e.sprite.x - s.x, e.sprite.y - s.y);
+      if (to.length() > reach) continue;
+      to.normalize();
+      if (to.dot(this.facing) >= minDot) {
+        e.takeDamage(dmg, s.x, s.y);
+        this.scene.spawnDamageText(e.sprite.x, e.sprite.y - 24, dmg, '#ffd34d');
+      }
+    }
+    for (const ar of this.scene.arrows.getChildren()) {
+      const to = new Phaser.Math.Vector2(ar.x - s.x, ar.y - s.y);
+      if (to.length() > reach) continue;
+      to.normalize();
+      if (to.dot(this.facing) >= minDot) {
+        this.scene.spawnDamageText(ar.x, ar.y, 'Отбито!', '#9be7ff');
+        this.scene.burst(ar.x, ar.y, 0x9be7ff, 6);
+        ar.destroy();
+      }
+    }
+    // взмах разбивает кислотные лужи
+    for (const pl of this.scene.acidPools.getChildren()) {
+      if (!pl.active || pl.hp === undefined) continue;
+      const to = new Phaser.Math.Vector2(pl.x - s.x, pl.y - s.y);
+      if (to.length() > reach + 20) continue;
+      to.normalize();
+      if (to.dot(this.facing) >= minDot) this.scene.damagePool(pl);
+    }
+  }
+
+  tryDash(time, dir) {
+    if (time < this.dashCd) return;
+    this.dashCd = time + 1200;
+    this.isDashing = true;
+    SoundFX.dash();
+    this.sprite.setVelocity(dir.x * 640, dir.y * 640);
+    this.sprite.setAlpha(0.45);
+    for (let i = 1; i <= 3; i++) {
+      this.scene.time.delayedCall(i * 40, () => {
+        const ghost = this.scene.add.image(this.sprite.x, this.sprite.y, 'player')
+          .setAlpha(0.3).setRotation(this.sprite.rotation).setDepth(4);
+        this.scene.tweens.add({ targets: ghost, alpha: 0, duration: 250, onComplete: () => ghost.destroy() });
+      });
+    }
+    this.scene.time.delayedCall(140, () => {
+      this.isDashing = false;
+      this.sprite.setAlpha(1);
+      this.sprite.setVelocity(dir.x * this.speed, dir.y * this.speed);
+    });
+  }
+
+  takeDamage(n) {
+    if (this.scene.shopOpen || this.scene.pauseOpen) return;
+    const t = this.scene.time.now;
+    if (t < this.invulnUntil || this.isDashing) return;
+    this.invulnUntil = t + 600;
+    this.hp = Math.max(0, this.hp - n);
+    this.sprite.setTintFill(0xffffff);
+    SoundFX.hurt();
+    this.scene.burst(this.sprite.x, this.sprite.y, 0xff6b6b, 6);
+    this.scene.time.delayedCall(90, () => this.sprite.clearTint());
+    this.scene.cameras.main.shake(130, 0.008);
+    this.scene.spawnDamageText(this.sprite.x, this.sprite.y - 26, n, '#ff6b6b');
+    this.scene.refreshHud();
+    if (this.hp <= 0) this.scene.gameOver();
+  }
+}
+// ==== КОНЕЦ ЧАСТИ 1 ====// ======================== БАЗОВЫЙ ВРАГ ========================
+class Fighter {
+  constructor(scene, x, y, texture) {
+    this.scene = scene;
+    this.shadow = scene.add.image(x, y + 14, 'shadow').setAlpha(0.35).setDepth(1);
+    this.sprite = scene.physics.add.sprite(x, y, texture);
+    this.sprite.setCollideWorldBounds(true);
+    this.sprite.body.setSize(24, 24).setOffset(4, 4);
+    this.stunnedUntil = 0;
+    this.windingUp = false;
+    this.dead = false;
+    this.deathHandled = false;
+    this.elite = false;
+    this.aura = null;
+    this.hpBar = scene.add.graphics().setDepth(40);
+  }
+
+  takeDamage(n, fromX, fromY) {
+    if (this.dead) return;
+    this.hp -= n;
+    this.windingUp = false;
+    const kb = this.elite ? 160 : 280;
+    const a = Phaser.Math.Angle.Between(fromX, fromY, this.sprite.x, this.sprite.y);
+    this.sprite.setVelocity(Math.cos(a) * kb, Math.sin(a) * kb);
+    this.stunnedUntil = this.scene.time.now + 200;
+    this.sprite.setTintFill(0xffffff);
+    this.scene.burst(this.sprite.x, this.sprite.y, 0xffffff, 5);
+    this.scene.time.delayedCall(80, () => { if (!this.dead) this.sprite.clearTint(); });
+    if (this.hp <= 0) this.die();
+  }
+
+  die() {
+    if (this.dead || this.deathHandled) return;
+    this.dead = true;
+    this.deathHandled = true;
+    this.hpBar.destroy();
+    this.scene.burst(this.sprite.x, this.sprite.y, this.elite ? 0xffd34d : 0xd84a3a, this.elite ? 22 : 14);
+    this.scene.onEnemyKilled(this);
+    this.scene.tweens.add({
+      targets: this.sprite, alpha: 0, scaleX: 0.1, scaleY: 0.1, angle: 120,
+      duration: 280, onComplete: () => this.destroySprite()
+    });
+  }
+
+  destroySprite() {
+    if (this.shadow) { this.shadow.destroy(); this.shadow = null; }
+    if (this.aura) {
+      this.scene.tweens.killTweensOf(this.aura);
+      this.aura.destroy();
+      this.aura = null;
+    }
+    const cols = this.scene.physics.world.colliders.getActive();
+    for (const c of cols) {
+      if (c.object1 === this.sprite || c.object2 === this.sprite) c.destroy();
+    }
+    this.sprite.destroy();
+  }
+
+  drawHpBar() {
+    const g = this.hpBar, s = this.sprite;
+    if (this.shadow) this.shadow.setPosition(s.x, s.y + 14);
+    if (this.aura) this.aura.setPosition(s.x, s.y);
+    g.clear();
+    if (this.hp >= this.maxHp) return;
+    const w = this.elite ? 44 : 32;
+    g.fillStyle(0x000000, 0.6).fillRect(s.x - w / 2, s.y - 30, w, 5);
+    g.fillStyle(this.elite ? 0xffd34d : 0xe0483e)
+      .fillRect(s.x - w / 2 + 1, s.y - 29, (w - 2) * Phaser.Math.Clamp(this.hp / this.maxHp, 0, 1), 3);
+  }
+}
+
+// ======================== ВРАГ-РУБАКА ========================
+class Enemy extends Fighter {
+  constructor(scene, x, y) {
+    super(scene, x, y, 'enemy');
+    this.maxHp = 30; this.hp = 30;
+    this.speed = 105; this.damage = 8;
+    this.aggroRange = 280; this.attackRange = 44;
+    this.attackCd = 0;
+    this.xpReward = 12;
+    this.goldReward = 6;
+  }
+
+  update(time, delta, player) {
+    if (this.dead) return;
+    const s = this.sprite, p = player.sprite;
+    if (!s.body) { this.dead = true; return; }
+    if (time < this.stunnedUntil) { s.body.velocity.scale(0.86); this.drawHpBar(); return; }
+    if (!this.windingUp) {
+      const d = Phaser.Math.Distance.Between(s.x, s.y, p.x, p.y);
+      if (d <= this.attackRange) {
+        s.setVelocity(0, 0);
+        this.tryAttack(time, player);
+      } else if (d <= this.aggroRange) {
+        this.scene.physics.moveTo(s, p.x, p.y, this.speed);
+        s.setRotation(Phaser.Math.Angle.Between(s.x, s.y, p.x, p.y));
+      } else {
+        s.setVelocity(0, 0);
+      }
+    }
+    this.drawHpBar();
+  }
+
+  tryAttack(time, player) {
+    if (time < this.attackCd) return;
+    this.attackCd = time + 1100;
+    this.windingUp = true;
+    this.sprite.setVelocity(0, 0);
+    this.sprite.setTint(0xffb84d);
+    this.scene.time.delayedCall(320, () => {
+      this.windingUp = false;
+      if (this.dead) return;
+      this.sprite.clearTint();
+      const d = Phaser.Math.Distance.Between(this.sprite.x, this.sprite.y, player.sprite.x, player.sprite.y);
+      if (d <= this.attackRange + 16) player.takeDamage(this.damage);
+    });
+  }
+}
+
+// ======================== ВРАГ-ЛУЧНИК ========================
+class Archer extends Fighter {
+  constructor(scene, x, y) {
+    super(scene, x, y, 'archer');
+    this.maxHp = 22; this.hp = 22;
+    this.speed = 100; this.damage = 10;
+    this.aggroRange = 420;
+    this.keepMin = 220; this.keepMax = 330;
+    this.shootCd = 0;
+    this.xpReward = 16;
+    this.goldReward = 9;
+  }
+
+  update(time, delta, player) {
+    if (this.dead) return;
+    const s = this.sprite, p = player.sprite;
+    if (!s.body) { this.dead = true; return; }
+    if (time < this.stunnedUntil) { s.body.velocity.scale(0.86); this.drawHpBar(); return; }
+    if (!this.windingUp) {
+      const d = Phaser.Math.Distance.Between(s.x, s.y, p.x, p.y);
+      if (d < this.keepMin) {
+        const a = Phaser.Math.Angle.Between(p.x, p.y, s.x, s.y);
+        s.setVelocity(Math.cos(a) * this.speed, Math.sin(a) * this.speed);
+      } else if (d > this.keepMax) {
+        if (d < this.aggroRange) this.scene.physics.moveTo(s, p.x, p.y, this.speed);
+        else s.setVelocity(0, 0);
+      } else {
+        s.setVelocity(0, 0);
+        s.setRotation(Phaser.Math.Angle.Between(s.x, s.y, p.x, p.y));
+        this.tryShoot(time, player);
+      }
+    }
+    this.drawHpBar();
+  }
+
+  tryShoot(time, player) {
+    if (time < this.shootCd) return;
+    this.shootCd = time + 1700;
+    this.windingUp = true;
+    this.sprite.setVelocity(0, 0);
+    this.sprite.setTint(0x9be7ff);
+    this.scene.time.delayedCall(380, () => {
+      this.windingUp = false;
+      if (this.dead) return;
+      this.sprite.clearTint();
+      const s = this.sprite, p = player.sprite;
+      const a = Phaser.Math.Angle.Between(s.x, s.y, p.x, p.y);
+      const ar = this.scene.arrows.create(s.x + Math.cos(a) * 24, s.y + Math.sin(a) * 24, 'arrow');
+      ar.setRotation(a);
+      ar.setVelocity(Math.cos(a) * 360, Math.sin(a) * 360);
+      ar.setDepth(20);
+      ar.dmg = this.damage;
+      ar.lifeUntil = this.scene.time.now + 2500;
+      if (this.elite) ar.setTint(0xffd34d);
+    });
+  }
+}
+// ==== КОНЕЦ ЧАСТИ 2 ====// ======================== БОСС 1: СТРАЖ ТЕНЕЙ ========================
+class Boss extends Fighter {
+  constructor(scene, x, y, zone) {
+    super(scene, x, y, 'boss');
+    this.zone = zone;
+    this.bossName = 'СТРАЖ ТЕНЕЙ';
+    this.sprite.setScale(1.8);
+    this.sprite.body.setSize(26, 26).setOffset(3, 3);
+    this.shadow.setScale(2.2);
+    this.maxHp = 220 + (zone - 1) * 140;
+    this.hp = this.maxHp;
+    this.speed = 95;
+    this.damage = 14 + zone * 2;
+    this.arrowDmg = 8 + zone * 2;
+    this.chargeDmg = 16 + zone * 2;
+    this.xpReward = 90 + zone * 30;
+    this.goldReward = 50 + zone * 10;
+    this.swipeCd = 0;
+    this.specialCd = scene.time.now + 1500;
+    this.charging = false;
+    this.chargeHit = false;
+    this.enraged = false;
+  }
+
+  drawHpBar() {}
+
+  update(time, delta, player) {
+    if (this.dead) return;
+    const s = this.sprite, p = player.sprite;
+    if (!s.body) { this.dead = true; return; }
+    if (this.shadow) this.shadow.setPosition(s.x, s.y + 30);
+    const d = Phaser.Math.Distance.Between(s.x, s.y, p.x, p.y);
+
+    if (!this.enraged && this.hp < this.maxHp / 2) {
+      this.enraged = true;
+      this.speed += 30;
+      this.scene.showBanner('СТРАЖ ВПАЛ В ЯРОСТЬ!', '#ff5a5a', 22);
+      this.scene.cameras.main.shake(200, 0.01);
+    }
+
+    if (time < this.stunnedUntil) { s.body.velocity.scale(0.8); return; }
+
+    if (this.charging) {
+      if (!this.chargeHit && d < 56) { player.takeDamage(this.chargeDmg); this.chargeHit = true; }
+      return;
+    }
+    if (this.windingUp) return;
+
+    if (d <= 76) {
+      s.setVelocity(0, 0);
+      this.trySwipe(time, player);
+    } else {
+      this.scene.physics.moveTo(s, p.x, p.y, this.speed);
+      s.setRotation(Phaser.Math.Angle.Between(s.x, s.y, p.x, p.y));
+      this.trySpecial(time, player, d);
+    }
+  }
+
+  trySwipe(time, player) {
+    if (time < this.swipeCd) return;
+    this.swipeCd = time + (this.enraged ? 800 : 1100);
+    this.windingUp = true;
+    this.sprite.setTint(0xffb84d);
+    this.scene.time.delayedCall(340, () => {
+      this.windingUp = false;
+      if (this.dead) return;
+      this.sprite.clearTint();
+      const d = Phaser.Math.Distance.Between(this.sprite.x, this.sprite.y, player.sprite.x, player.sprite.y);
+      if (d <= 96) player.takeDamage(this.damage);
+    });
+  }
+
+  trySpecial(time, player, d) {
+    if (time < this.specialCd) return;
+    this.specialCd = time + (this.enraged ? 2400 : 3600);
+    if (d > 170) this.startCharge(player); else this.startVolley();
+  }
+
+  startCharge(player) {
+    this.windingUp = true;
+    this.sprite.setVelocity(0, 0);
+    this.sprite.setTint(0xff4444);
+    this.scene.time.delayedCall(450, () => {
+      if (this.dead) return;
+      this.windingUp = false;
+      this.sprite.clearTint();
+      const a = Phaser.Math.Angle.Between(this.sprite.x, this.sprite.y, player.sprite.x, player.sprite.y);
+      this.charging = true; this.chargeHit = false;
+      this.sprite.setRotation(a);
+      this.sprite.setVelocity(Math.cos(a) * 700, Math.sin(a) * 700);
+      this.scene.time.delayedCall(360, () => {
+        this.charging = false;
+        if (!this.dead) this.sprite.setVelocity(0, 0);
+      });
+    });
+  }
+
+  startVolley() {
+    this.windingUp = true;
+    this.sprite.setVelocity(0, 0);
+    this.sprite.setTint(0xb26bff);
+    this.scene.time.delayedCall(500, () => {
+      this.windingUp = false;
+      if (this.dead) return;
+      this.sprite.clearTint();
+      const n = 12;
+      for (let i = 0; i < n; i++) {
+        const a = (Math.PI * 2 / n) * i;
+        const ar = this.scene.arrows.create(this.sprite.x + Math.cos(a) * 40, this.sprite.y + Math.sin(a) * 40, 'arrow');
+        ar.setRotation(a);
+        ar.setVelocity(Math.cos(a) * 270, Math.sin(a) * 270);
+        ar.setTint(0xb26bff);
+        ar.setDepth(20);
+        ar.dmg = this.arrowDmg;
+        ar.lifeUntil = this.scene.time.now + 2200;
+      }
+      this.scene.cameras.main.shake(120, 0.006);
+    });
+  }
+
+  takeDamage(n, fromX, fromY) {
+    if (this.dead) return;
+    this.hp -= n;
+    const a = Phaser.Math.Angle.Between(fromX, fromY, this.sprite.x, this.sprite.y);
+    this.sprite.setVelocity(Math.cos(a) * 70, Math.sin(a) * 70);
+    this.stunnedUntil = this.scene.time.now + 120;
+    this.sprite.setTintFill(0xffffff);
+    this.scene.burst(this.sprite.x, this.sprite.y, 0xffffff, 4);
+    this.scene.time.delayedCall(70, () => { if (!this.dead) this.sprite.clearTint(); });
+    this.scene.updateBossBar();
+    if (this.hp <= 0) this.die();
+  }
+
+  die() {
+    if (this.dead || this.deathHandled) return;
+    this.dead = true;
+    this.deathHandled = true;
+    this.hpBar.destroy();
+    this.scene.burst(this.sprite.x, this.sprite.y, 0xb26bff, 26);
+    this.scene.burst(this.sprite.x, this.sprite.y, 0xffd34d, 14);
+    const s = this.sprite;
+    this.scene.tweens.add({
+      targets: s, alpha: 0, scaleX: 0.1, scaleY: 0.1, angle: 180,
+      duration: 500, onComplete: () => this.destroySprite()
+    });
+    this.scene.onBossKilled(this);
+  }
+}
+
+// ======================== БОСС 2: ПОЖИРАТЕЛЬ ========================
+class Devourer extends Fighter {
+  constructor(scene, x, y, zone) {
+    super(scene, x, y, 'devourer');
+    this.zone = zone;
+    this.bossName = 'ПОЖИРАТЕЛЬ';
+    this.sprite.setScale(1.9);
+    this.sprite.body.setSize(30, 30).setOffset(1, 1);
+    this.shadow.setScale(2.4);
+    this.maxHp = 260 + (zone - 1) * 150;
+    this.hp = this.maxHp;
+    this.speed = 80;
+    this.damage = 12 + zone * 2;    // укус
+    this.spitDmg = 9 + zone * 2;    // кислота
+    this.xpReward = 100 + zone * 30;
+    this.goldReward = 60 + zone * 12;
+    this.swipeCd = 0;
+    this.specialCd = scene.time.now + 1200;
+    this.burstSpit = false; // фаза ярости
+  }
+
+  drawHpBar() {}
+
+  update(time, delta, player) {
+    if (this.dead) return;
+    const s = this.sprite, p = player.sprite;
+    if (!s.body) { this.dead = true; return; }
+    if (this.shadow) this.shadow.setPosition(s.x, s.y + 32);
+    const d = Phaser.Math.Distance.Between(s.x, s.y, p.x, p.y);
+
+    if (!this.burstSpit && this.hp < this.maxHp / 2) {
+      this.burstSpit = true;
+      this.speed += 15;
+      this.scene.showBanner('ПОЖИРАТЕЛЬ БЕШЕНО ПЛЮЁТСЯ!', '#7dff5a', 22);
+      this.scene.cameras.main.shake(200, 0.01);
+    }
+
+    if (time < this.stunnedUntil) { s.body.velocity.scale(0.8); return; }
+    if (this.windingUp) return;
+
+    if (d <= 86) {
+      s.setVelocity(0, 0);
+      this.trySwipe(time, player);
+    } else {
+      this.scene.physics.moveTo(s, p.x, p.y, this.speed);
+      s.setRotation(Phaser.Math.Angle.Between(s.x, s.y, p.x, p.y));
+      this.trySpecial(time, player);
+    }
+  }
+
+  trySwipe(time, player) {
+    if (time < this.swipeCd) return;
+    this.swipeCd = time + 1300;
+    this.windingUp = true;
+    this.sprite.setTint(0xffb84d);
+    this.scene.time.delayedCall(400, () => {
+      this.windingUp = false;
+      if (this.dead) return;
+      this.sprite.clearTint();
+      const d = Phaser.Math.Distance.Between(this.sprite.x, this.sprite.y, player.sprite.x, player.sprite.y);
+      if (d <= 106) player.takeDamage(this.damage);
+    });
+  }
+
+  trySpecial(time, player) {
+    if (time < this.specialCd) return;
+    this.specialCd = time + (this.burstSpit ? 2600 : 3800);
+    // 40% — призыв миньонов, 60% — плевок кислотой
+    if (Math.random() < 0.4) this.summon(player); else this.spit(player);
+  }
+
+  summon(player) {
+    this.windingUp = true;
+    this.sprite.setVelocity(0, 0);
+    this.sprite.setTint(0xb26bff);
+    this.scene.time.delayedCall(500, () => {
+      this.windingUp = false;
+      if (this.dead) return;
+      this.sprite.clearTint();
+      SoundFX.bossRoar();
+      for (let i = 0; i < 2; i++) {
+        const x = this.sprite.x + Phaser.Math.Between(-90, 90);
+        const y = this.sprite.y + Phaser.Math.Between(-90, 90);
+        const e = new Enemy(this.scene, x, y);
+        e.maxHp = Math.round(30 * (1 + (this.zone - 1) * 0.3)); e.hp = e.maxHp;
+        e.damage = Math.round(8 * (1 + (this.zone - 1) * 0.2));
+        e.xpReward = Math.round(12 * (1 + (this.zone - 1) * 0.35));
+        this.scene.registerEnemy(e);
+        this.scene.burst(x, y, 0xb26bff, 8);
+      }
+      this.scene.spawnDamageText(this.sprite.x, this.sprite.y - 60, 'ПРИЗЫВ!', '#b26bff');
+    });
+  }
+
+  spit(player) {
+    this.windingUp = true;
+    this.sprite.setVelocity(0, 0);
+    this.sprite.setTint(0x7dff5a);
+    this.scene.time.delayedCall(450, () => {
+      this.windingUp = false;
+      if (this.dead) return;
+      this.sprite.clearTint();
+      SoundFX.spit();
+      const shots = this.burstSpit ? 3 : 1;
+      const baseA = Phaser.Math.Angle.Between(this.sprite.x, this.sprite.y, player.sprite.x, player.sprite.y);
+      for (let i = 0; i < shots; i++) {
+        const a = baseA + (i - (shots - 1) / 2) * 0.3;
+        this.scene.spawnPool(this.sprite.x + Math.cos(a) * 60, this.sprite.y + Math.sin(a) * 60, this.spitDmg);
+      }
+    });
+  }
+
+  takeDamage(n, fromX, fromY) {
+    if (this.dead) return;
+    this.hp -= n;
+    const a = Phaser.Math.Angle.Between(fromX, fromY, this.sprite.x, this.sprite.y);
+    this.sprite.setVelocity(Math.cos(a) * 70, Math.sin(a) * 70);
+    this.stunnedUntil = this.scene.time.now + 120;
+    this.sprite.setTintFill(0xffffff);
+    this.scene.burst(this.sprite.x, this.sprite.y, 0xffffff, 4);
+    this.scene.time.delayedCall(70, () => { if (!this.dead) this.sprite.clearTint(); });
+    this.scene.updateBossBar();
+    if (this.hp <= 0) this.die();
+  }
+
+  die() {
+    if (this.dead || this.deathHandled) return;
+    this.dead = true;
+    this.deathHandled = true;
+    this.hpBar.destroy();
+    this.scene.burst(this.sprite.x, this.sprite.y, 0x7dff5a, 26);
+    this.scene.burst(this.sprite.x, this.sprite.y, 0xffd34d, 14);
+    const s = this.sprite;
+    this.scene.tweens.add({
+      targets: s, alpha: 0, scaleX: 0.1, scaleY: 0.1, angle: 180,
+      duration: 500, onComplete: () => this.destroySprite()
+    });
+    this.scene.onBossKilled(this);
+  }
+}
+// ==== КОНЕЦ ЧАСТИ 3 ====// ======================== СЦЕНА ИГРЫ ========================
+class GameScene extends Phaser.Scene {
+  constructor() { super('game'); }
+
+  create() {
+    this.makeTextures();
+    this.isOver = false;
+    const save = loadSave();
+    this.kills = save ? (save.kills || 0) : 0;
+    this.zone = save ? (save.zone || 1) : 1;
+    this.zoneKills = save ? (save.zoneKills || 0) : 0;
+    this.gold = (save && save.gold != null) ? save.gold : 0;
+    this.shopUpgrades = (save && save.shopUpgrades) ? save.shopUpgrades : { str: 0, vit: 0, sharp: 0 };
+    this.killsForBoss = 10;
+    this.boss = null; this.bossActive = false;
+    this.portalActive = false; this.changingZone = false;
+    this.shopOpen = false; this.shopEls = null;
+    this.pauseOpen = false; this.pauseEls = null;
+
+    this.abilities = [
+      { id:'whirl', label:'ВИХ', fullName:'Вихрь',            unlock:2, cd:6000,  last:-99999, color:0x9be7ff, css:'#9be7ff', use: () => this.useWhirlwind() },
+      { id:'wave',  label:'ВОЛ', fullName:'Огненная волна',   unlock:4, cd:8000,  last:-99999, color:0xffa23e, css:'#ffa23e', use: () => this.useFireWave() },
+      { id:'shout', label:'КРИ', fullName:'Целительный крик', unlock:6, cd:12000, last:-99999, color:0x7dff8a, css:'#7dff8a', use: () => this.useShout() },
+    ];
+
+    this.WORLD_W = 1600; this.WORLD_H = 1200;
+    this.physics.world.setBounds(0, 0, this.WORLD_W, this.WORLD_H);
+    this.add.tileSprite(0, 0, this.WORLD_W, this.WORLD_H, 'tile').setOrigin(0);
+
+    for (let i = 0; i < 40; i++) {
+      this.add.image(Phaser.Math.Between(0, this.WORLD_W), Phaser.Math.Between(0, this.WORLD_H), 'dot')
+        .setTint(0x0a0f18)
+        .setAlpha(Phaser.Math.FloatBetween(0.2, 0.45))
+        .setScale(Phaser.Math.FloatBetween(6, 18))
+        .setDepth(0);
+    }
+
+    this.rocks = this.physics.add.staticGroup();
+    this.createRocks();
+
+    this.arrows = this.physics.add.group();
+    this.playerShots = this.physics.add.group();
+    this.drops = this.physics.add.group({ immovable: true });
+    this.potionDrops = this.physics.add.group({ immovable: true });
+    this.portalGroup = this.physics.add.staticGroup();
+    this.acidPools = this.physics.add.staticGroup();
+
+    this.player = new Player(this, 800, 600, save);
+    this.player.potions = Math.min(this.player.potions, this.maxPotions());
+    this.physics.add.collider(this.player.sprite, this.rocks);
+    this.playerShadow = this.add.image(800, 614, 'shadow').setAlpha(0.4).setDepth(1);
+    this.tweens.add({ targets: this.player.sprite, scaleY: 1.07, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+
+    this.enemies = [];
+    const initialCount = (this.zoneKills >= this.killsForBoss) ? 3 : 6;
+    for (let i = 0; i < initialCount; i++) this.spawnEnemy();
+
+    this.physics.add.overlap(this.player.sprite, this.drops, (ps, d) => this.tryPickup(d));
+    this.physics.add.overlap(this.player.sprite, this.potionDrops, (ps, d) => this.pickupPotion(d));
+    this.physics.add.overlap(this.player.sprite, this.portalGroup, () => this.enterPortal());
+    this.physics.add.overlap(this.player.sprite, this.arrows, (ps, ar) => {
+      this.player.takeDamage(ar.dmg);
+      ar.destroy();
+    });
+    this.physics.add.overlap(this.arrows, this.rocks, (ar) => ar.destroy());
+    this.physics.add.overlap(this.playerShots, this.rocks, (sh) => sh.destroy());
+
+    const cam = this.cameras.main;
+    cam.setBounds(0, 0, this.WORLD_W, this.WORLD_H);
+    cam.startFollow(this.player.sprite, true, 0.1, 0.1);
+
+    this.keys = this.input.keyboard.addKeys('W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE,J,K,SHIFT,H,U,I,O,ESC');
+    this.setupTouch();
+
+    this.hudGfx = this.add.graphics().setScrollFactor(0).setDepth(100);
+    this.hudText = this.add.text(124, 25, '', { fontSize: '15px', color: '#fff', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(101);
+    this.killsText = this.add.text(16, 56, '', { fontSize: '12px', color: '#9fb3c8' })
+      .setScrollFactor(0).setDepth(101);
+    this.potionsText = this.add.text(16, 72, '', { fontSize: '12px', color: '#7dff8a' })
+      .setScrollFactor(0).setDepth(101);
+    this.goldText = this.add.text(16, 88, '', { fontSize: '12px', color: '#ffd34d' })
+      .setScrollFactor(0).setDepth(101);
+    this.objText = this.add.text(this.scale.width / 2, 12, '', { fontSize: '13px', color: '#9fb3c8', fontStyle: 'bold' })
+      .setOrigin(0.5, 0).setScrollFactor(0).setDepth(101);
+    this.weaponText = this.add.text(this.scale.width - 16, 14, '', { fontSize: '15px', fontStyle: 'bold' })
+      .setOrigin(1, 0).setScrollFactor(0).setDepth(101);
+    this.dmgText = this.add.text(this.scale.width - 16, 34, '', { fontSize: '12px', color: '#9fb3c8' })
+      .setOrigin(1, 0).setScrollFactor(0).setDepth(101);
+    this.shopBtn = this.add.text(this.scale.width - 16, 60, '[ ЛАВКА ]', { fontSize: '15px', color: '#ffd34d', fontStyle: 'bold' })
+      .setOrigin(1, 0).setScrollFactor(0).setDepth(101).setInteractive({ useHandCursor: true });
+    this.shopBtn.on('pointerdown', () => {
+      if (this.shopOpen || this.isOver || this.pauseOpen) return;
+      if (!this.bossActive) this.openShop();
+      else this.spawnDamageText(this.player.sprite.x, this.player.sprite.y - 30, 'В бою с боссом нельзя!', '#8a93a3');
+    });
+    this.add.text(this.scale.width - 16, 88, '[ II ]', { fontSize: '14px', color: '#9fb3c8', fontStyle: 'bold' })
+      .setOrigin(1, 0).setScrollFactor(0).setDepth(101).setInteractive({ useHandCursor: true })
+      .on('pointerdown', () => this.openPause());
+    this.bossBarGfx = this.add.graphics().setScrollFactor(0).setDepth(100);
+    this.bossNameText = this.add.text(this.scale.width / 2, 22, '', { fontSize: '13px', color: '#fff', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(102);
+    this.createVignette();
+        // свернули игру — автоматически пауза
+    this.game.events.on('hidden', () => {
+      if (!this.isOver && !this.shopOpen && !this.pauseOpen) this.openPause();
+    });
+    this.refreshHud();
+    this.updateAbilityButtons(this.time.now);
+
+    this.add.text(this.scale.width / 2, this.scale.height - 12,
+      'АТК — удар · РЫВ · ЗЕЛ — зелье · Умения справа · II — пауза',
+      { fontSize: '12px', color: '#5a6b80' }).setOrigin(0.5, 1).setScrollFactor(0).setDepth(100);
+  }
+
+  createRocks() {
+    for (let i = 0; i < 12; i++) {
+      const x = Phaser.Math.Between(80, this.WORLD_W - 80);
+      const y = Phaser.Math.Between(80, this.WORLD_H - 80);
+      if (Phaser.Math.Distance.Between(x, y, 800, 600) < 180) { i--; continue; }
+      const gray = Phaser.Math.Between(90, 150);
+      this.rocks.create(x, y, 'rock').setTint(Phaser.Display.Color.GetColor(gray, gray, gray));
+    }
+  }
+
+  maxPotions() { return Math.min(5, 1 + this.zone); }
+
+  update(time, delta) {
+    if (Phaser.Input.Keyboard.JustDown(this.keys.ESC)) {
+      if (this.shopOpen) this.closeShop();
+      else if (this.pauseOpen) this.closePause();
+      else if (!this.isOver) this.openPause();
+    }
+    if (this.isOver || this.shopOpen || this.pauseOpen) return;
+
+    if (this.playerShadow) this.playerShadow.setPosition(this.player.sprite.x, this.player.sprite.y + 14);
+
+    if (!this.bossActive && !this.portalActive && this.zoneKills >= this.killsForBoss) {
+      this.spawnBoss();
+    }
+
+    const k = this.keys;
+    let ix = 0, iy = 0;
+    if (k.A.isDown || k.LEFT.isDown) ix -= 1;
+    if (k.D.isDown || k.RIGHT.isDown) ix += 1;
+    if (k.W.isDown || k.UP.isDown) iy -= 1;
+    if (k.S.isDown || k.DOWN.isDown) iy += 1;
+    if (this.joy.active) { ix = this.joy.x; iy = this.joy.y; }
+    const input = {
+      x: ix, y: iy,
+      attack: Phaser.Input.Keyboard.JustDown(k.SPACE) || Phaser.Input.Keyboard.JustDown(k.J) || this.btnAtk,
+      dash: Phaser.Input.Keyboard.JustDown(k.SHIFT) || Phaser.Input.Keyboard.JustDown(k.K) || this.btnDash
+    };
+    this.btnAtk = false; this.btnDash = false;
+    if (Phaser.Input.Keyboard.JustDown(k.H) || this.btnPotion) {
+      this.btnPotion = false;
+      this.player.tryPotion(time);
+    }
+    if (Phaser.Input.Keyboard.JustDown(k.U)) this.tryAbility(this.abilities[0]);
+    if (Phaser.Input.Keyboard.JustDown(k.I)) this.tryAbility(this.abilities[1]);
+    if (Phaser.Input.Keyboard.JustDown(k.O)) this.tryAbility(this.abilities[2]);
+
+    this.player.update(time, delta, input);
+    for (const e of this.enemies) e.update(time, delta, this.player);
+    for (const ar of this.arrows.getChildren()) {
+      if (time > ar.lifeUntil) ar.destroy();
+    }
+    for (const sh of this.playerShots.getChildren()) {
+      if (time > sh.lifeUntil) sh.destroy();
+    }
+    this.updateAbilityButtons(time);
+  }
+
+  // ---- Эффекты ----
+  burst(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      const p = this.add.image(x, y, 'dot').setTint(color).setDepth(50);
+      const a = Math.random() * Math.PI * 2;
+      const sp = 40 + Math.random() * 140;
+      this.tweens.add({
+        targets: p,
+        x: x + Math.cos(a) * sp,
+        y: y + Math.sin(a) * sp,
+        alpha: 0, scale: 0.2,
+        duration: 250 + Math.random() * 250,
+        onComplete: () => p.destroy()
+      });
+    }
+  }
+
+  createVignette() {
+    const w = this.scale.width, h = this.scale.height;
+    if (this.textures.exists('vignette')) this.textures.remove('vignette');
+    const ct = this.textures.createCanvas('vignette', w, h);
+    const ctx = ct.getContext();
+    const grad = ctx.createRadialGradient(w / 2, h / 2, h * 0.35, w / 2, h / 2, h * 0.85);
+    grad.addColorStop(0, 'rgba(0,0,0,0)');
+    grad.addColorStop(1, 'rgba(0,0,0,0.55)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    ct.refresh();
+    this.add.image(0, 0, 'vignette').setOrigin(0).setScrollFactor(0).setDepth(95);
+  }
+
+  // ---- Пауза ----
+  openPause() {
+    if (this.pauseOpen || this.isOver || this.shopOpen) return;
+    this.pauseOpen = true;
+    this.physics.pause();
+    const w = this.scale.width, h = this.scale.height;
+    this.pauseEls = [];
+    const add = o => { this.pauseEls.push(o); return o; };
+
+    add(this.add.rectangle(w / 2, h / 2, w, h, 0x000000, 0.7).setScrollFactor(0).setDepth(300).setInteractive());
+    add(this.add.text(w / 2, h / 2 - 100, 'ПАУЗА', { fontSize: '34px', color: '#fff', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(301));
+    add(this.add.text(w / 2, h / 2 - 58,
+      `Уровень ${this.player.lvl} · Зона ${this.zone} · Золото ${this.gold}`,
+      { fontSize: '14px', color: '#9fb3c8' }).setOrigin(0.5).setScrollFactor(0).setDepth(301));
+
+    const mkBtn = (y, label, cb) => {
+      const bg = add(this.add.rectangle(w / 2, y, 250, 48, 0x2a3a55, 1)
+        .setStrokeStyle(2, 0x4a5f83).setScrollFactor(0).setDepth(301).setInteractive({ useHandCursor: true }));
+      add(this.add.text(w / 2, y, label, { fontSize: '17px', color: '#e8eef7', fontStyle: 'bold' })
+        .setOrigin(0.5).setScrollFactor(0).setDepth(302));
+      bg.on('pointerdown', cb);
+    };
+    mkBtn(h / 2 + 0, 'ПРОДОЛЖИТЬ', () => this.closePause());
+    mkBtn(h / 2 + 60, 'В ГЛАВНОЕ МЕНЮ', () => {
+      this.saveGame();
+      this.pauseOpen = false;
+      this.scene.start('menu');
+    });
+  }
+
+  closePause() {
+    if (!this.pauseOpen) return;
+    for (const o of this.pauseEls) { if (o && o.scene) o.destroy(); }
+    this.pauseEls = null;
+    this.pauseOpen = false;
+    this.btnAtk = this.btnDash = this.btnPotion = false;
+    this.joy.active = false; this.joy.x = this.joy.y = 0;
+    this.joyGfx.clear();
+    this.physics.resume();
+  }
+
+  // ---- Кислотные лужи ----
+  spawnPool(x, y, dmg) {
+    const pl = this.acidPools.create(x, y, 'pool');
+    pl.setDepth(2);
+    pl.setAlpha(0.6);
+    pl.setTint(0x7dff5a);
+    pl.dmg = dmg;
+    pl.hp = 3;
+    pl.radius = 40;
+    pl.scale = 0.4;
+    pl.setScale(0.4);
+    pl.refreshBody();
+    this.tweens.add({ targets: pl, scale: 1.3, duration: 260, onUpdate: () => pl.refreshBody() });
+    this.tweens.add({ targets: pl, alpha: 0.4, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    // сама исчезает через 6 секунд
+    this.time.delayedCall(6000, () => { if (pl.active) this.removePool(pl); });
+  }
+
+  damagePool(pl) {
+    if (!pl.active) return;
+    pl.hp--;
+    SoundFX.hit();
+    this.burst(pl.x, pl.y, 0x7dff5a, 5);
+    this.tweens.add({ targets: pl, scale: pl.scale * 0.85, duration: 100, onUpdate: () => pl.refreshBody() });
+    if (pl.hp <= 0) this.removePool(pl);
+  }
+
+  removePool(pl) {
+    this.tweens.killTweensOf(pl);
+    this.burst(pl.x, pl.y, 0x7dff5a, 8);
+    pl.destroy();
+  }
+
+  // ---- Умения ----
+  tryAbility(a) {
+    if (this.isOver || this.shopOpen || this.pauseOpen) return;
+    const t = this.time.now;
+    if (this.player.lvl < a.unlock) {
+      this.spawnDamageText(this.player.sprite.x, this.player.sprite.y - 30, `Нужен ур. ${a.unlock}`, '#8a93a3');
+      return;
+    }
+    if (t - a.last < a.cd) return;
+    a.last = t;
+    a.use();
+    this.updateAbilityButtons(t);
+  }
+
+  useWhirlwind() {
+    const p = this.player, s = p.sprite;
+    const dmg = Math.round(p.totalDamage() * 1.5);
+    SoundFX.whirl();
+    const ring = this.add.circle(s.x, s.y, 120).setStrokeStyle(6, 0x9be7ff, 0.9).setDepth(35);
+    ring.setScale(0.2);
+    this.tweens.add({ targets: ring, scale: 1, alpha: 0, duration: 300, onComplete: () => ring.destroy() });
+    this.burst(s.x, s.y, 0x9be7ff, 10);
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      if (Phaser.Math.Distance.Between(s.x, s.y, e.sprite.x, e.sprite.y) <= 120) {
+        e.takeDamage(dmg, s.x, s.y);
+        this.spawnDamageText(e.sprite.x, e.sprite.y - 24, dmg, '#9be7ff');
+      }
+    }
+    // вихрь сносит кислотные лужи рядом
+    for (const pl of this.acidPools.getChildren()) {
+      if (!pl.active || pl.hp === undefined) continue;
+      if (Phaser.Math.Distance.Between(s.x, s.y, pl.x, pl.y) <= 140) this.removePool(pl);
+    }
+    this.cameras.main.shake(100, 0.006);
+  }
+
+  useFireWave() {
+    const p = this.player, s = p.sprite;
+    const dmg = p.totalDamage() * 2;
+    SoundFX.wave();
+    const base = p.facing.angle();
+    for (let i = -1; i <= 1; i++) {
+      const a = base + i * 0.22;
+      const f = this.playerShots.create(s.x + Math.cos(a) * 30, s.y + Math.sin(a) * 30, 'fireball');
+      f.setRotation(a);
+      f.setVelocity(Math.cos(a) * 420, Math.sin(a) * 420);
+      f.setDepth(25);
+      f.dmg = dmg;
+      f.lifeUntil = this.time.now + 900;
+    }
+    this.cameras.main.shake(80, 0.004);
+  }
+
+  useShout() {
+    const p = this.player, s = p.sprite;
+    const heal = Math.round(p.maxHp * 0.25);
+    SoundFX.shout();
+    p.hp = Math.min(p.maxHp, p.hp + heal);
+    const ring = this.add.circle(s.x, s.y, 160).setStrokeStyle(5, 0x7dff8a, 0.9).setDepth(35);
+    ring.setScale(0.2);
+    this.tweens.add({ targets: ring, scale: 1, alpha: 0, duration: 350, onComplete: () => ring.destroy() });
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      if (Phaser.Math.Distance.Between(s.x, s.y, e.sprite.x, e.sprite.y) <= 160) {
+        const a = Phaser.Math.Angle.Between(s.x, s.y, e.sprite.x, e.sprite.y);
+        e.sprite.setVelocity(Math.cos(a) * 500, Math.sin(a) * 500);
+        e.stunnedUntil = Math.max(e.stunnedUntil, this.time.now + 300);
+        e.windingUp = false;
+      }
+    }
+    this.spawnDamageText(s.x, s.y - 30, `+${heal}`, '#7dff8a');
+    this.refreshHud();
+  }
+
+  updateAbilityButtons(time) {
+    for (const a of this.abilities) {
+      if (!a.bg) continue;
+      if (this.player.lvl < a.unlock) {
+        a.bg.setFillStyle(0xffffff, 0.05);
+        a.txt.setText('?').setColor('#5a6b80');
+      } else {
+        const rem = a.cd - (time - a.last);
+        if (rem > 0) {
+          a.bg.setFillStyle(0x000000, 0.45);
+          a.txt.setText(String(Math.ceil(rem / 1000))).setColor('#8a93a8');
+        } else {
+          a.bg.setFillStyle(a.color, 0.18);
+          a.txt.setText(a.label).setColor(a.css);
+        }
+      }
+    }
+  }
+// ==== КОНЕЦ ЧАСТИ 4 ====  // ---- Лавка ----
+  shopCost(id) {
+    const u = this.shopUpgrades;
+    if (id === 'str') return 40 + 30 * u.str;
+    if (id === 'vit') return 40 + 30 * u.vit;
+    if (id === 'sharp') return 30 + 25 * u.sharp;
+    return 25;
+  }
+
+  openShop() {
+    if (this.shopOpen) return;
+    this.shopOpen = true;
+    this.physics.pause();
+    const w = this.scale.width, h = this.scale.height;
+    this.shopEls = [];
+    const add = o => { this.shopEls.push(o); return o; };
+
+    add(this.add.rectangle(w / 2, h / 2, w, h, 0x000000, 0.75).setScrollFactor(0).setDepth(300).setInteractive());
+    add(this.add.rectangle(w / 2, h / 2, 640, 420, 0x151b28, 1).setStrokeStyle(2, 0x3a4a63).setScrollFactor(0).setDepth(301));
+    add(this.add.text(w / 2, h / 2 - 182, 'КУЗНЕЦ ТЕНЕЙ', { fontSize: '26px', color: '#ffd34d', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(302));
+    this.shopGoldText = add(this.add.text(w / 2, h / 2 - 148, '', { fontSize: '16px', color: '#ffe27a' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(302));
+
+    this.shopRows = [];
+    const ids = ['str', 'vit', 'sharp', 'pot'];
+    ids.forEach((id, i) => {
+      const y = h / 2 - 100 + i * 62;
+      const row = { id };
+      row.labelObj = add(this.add.text(w / 2 - 295, y, '', { fontSize: '16px', color: '#e8eef7' })
+        .setOrigin(0, 0.5).setScrollFactor(0).setDepth(302));
+      row.costObj = add(this.add.text(w / 2 + 155, y, '', { fontSize: '15px', color: '#ffe27a', fontStyle: 'bold' })
+        .setOrigin(1, 0.5).setScrollFactor(0).setDepth(302));
+      row.btnBg = add(this.add.rectangle(w / 2 + 245, y, 100, 42, 0x2a3a55, 1)
+        .setStrokeStyle(1, 0x4a5f83).setScrollFactor(0).setDepth(302)
+        .setInteractive({ useHandCursor: true }));
+      row.btnTxt = add(this.add.text(w / 2 + 245, y, 'Купить', { fontSize: '16px', color: '#cfe0f5', fontStyle: 'bold' })
+        .setOrigin(0.5).setScrollFactor(0).setDepth(303));
+      row.btnBg.on('pointerdown', () => this.buyUpgrade(id));
+      this.shopRows.push(row);
+    });
+
+    const closeBtn = add(this.add.text(w / 2, h / 2 + 165, '— ЗАКРЫТЬ —', { fontSize: '20px', color: '#ffd34d', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(302).setInteractive({ useHandCursor: true }));
+    closeBtn.on('pointerdown', () => this.closeShop());
+
+    this.refreshShop();
+  }
+
+  refreshShop() {
+    if (!this.shopOpen || !this.shopRows) return;
+    const p = this.player;
+    this.shopGoldText.setText(`Золото: ${this.gold}`);
+    for (const r of this.shopRows) {
+      let desc = '';
+      if (r.id === 'str') desc = `Сила: +2 урона (сейчас ${p.totalDamage()})`;
+      if (r.id === 'vit') desc = `Здоровье: +15 макс. HP (сейчас ${p.maxHp})`;
+      if (r.id === 'sharp') desc = `Заточка: +2 к «${p.weapon.name}»`;
+      if (r.id === 'pot') desc = `Зелье лечения (у тебя ${p.potions}/${this.maxPotions()})`;
+      r.labelObj.setText(desc);
+      r.costObj.setText(`${this.shopCost(r.id)} з.`);
+    }
+  }
+
+  buyUpgrade(id) {
+    const cost = this.shopCost(id);
+    if (id === 'pot' && this.player.potions >= this.maxPotions()) { this.shopMsg('Зелья по максимуму'); return; }
+    if (this.gold < cost) { this.shopMsg('Не хватает золота!'); return; }
+    this.gold -= cost;
+    const p = this.player;
+    if (id === 'str') { p.baseAttack += 2; this.shopUpgrades.str++; }
+    if (id === 'vit') { p.maxHp += 15; p.hp += 15; this.shopUpgrades.vit++; }
+    if (id === 'sharp') { p.weapon.dmg += 2; this.shopUpgrades.sharp++; }
+    if (id === 'pot') { p.potions++; }
+    this.shopMsg('Куплено!', '#7dff8a');
+    SoundFX.buy();
+    this.refreshShop();
+    this.refreshHud();
+    this.saveGame();
+  }
+
+  shopMsg(txt, color) {
+    if (this.shopMsgObj && this.shopMsgObj.scene) this.shopMsgObj.destroy();
+    this.shopMsgObj = this.add.text(this.scale.width / 2, this.scale.height / 2 + 128, txt,
+      { fontSize: '14px', color: color || '#ff5a5a', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(303);
+    this.shopEls.push(this.shopMsgObj);
+    this.time.delayedCall(1200, () => {
+      if (this.shopMsgObj && this.shopMsgObj.scene) { this.shopMsgObj.destroy(); this.shopMsgObj = null; }
+    });
+  }
+
+  closeShop() {
+    if (!this.shopOpen) return;
+    for (const o of this.shopEls) { if (o && o.scene) o.destroy(); }
+    this.shopEls = null; this.shopRows = null; this.shopMsgObj = null;
+    this.shopOpen = false;
+    this.btnAtk = this.btnDash = this.btnPotion = false;
+    this.joy.active = false; this.joy.x = this.joy.y = 0;
+    this.joyGfx.clear();
+    this.physics.resume();
+  }
+
+  // ---- Враги и босс ----
+  registerEnemy(e) {
+    this.enemies.push(e);
+    this.physics.add.collider(e.sprite, this.rocks);
+    this.physics.add.collider(e.sprite, this.player.sprite);
+    // Phaser передаёт в overlap сначала СПРАЙТ, потом объект группы — порядок важен!
+    this.physics.add.overlap(this.playerShots, e.sprite, (enemySprite, shot) => {
+      if (e.dead) return;
+      if (!shot || shot.dmg === undefined) return;
+      e.takeDamage(shot.dmg, enemySprite.x, enemySprite.y);
+      this.spawnDamageText(enemySprite.x, enemySprite.y - 24, shot.dmg, '#ffa23e');
+      this.burst(enemySprite.x, enemySprite.y, 0xffa23e, 6);
+      shot.destroy();
+    });
+    for (const o of this.enemies) {
+      if (o !== e && !o.dead) this.physics.add.collider(e.sprite, o.sprite);
+    }
+  }
+
+  makeElite(e) {
+    e.elite = true;
+    e.sprite.setScale(1.35);
+    e.maxHp = Math.round(e.maxHp * 3); e.hp = e.maxHp;
+    e.damage = Math.round(e.damage * 2);
+    e.xpReward = Math.round(e.xpReward * 2.5);
+    e.goldReward = Math.round(e.goldReward * 3);
+    e.speed = Math.round(e.speed * 0.9);
+    e.aura = this.add.image(e.sprite.x, e.sprite.y, 'ring')
+      .setTint(0xffd34d).setAlpha(0.7).setDepth(2);
+    this.tweens.add({
+      targets: e.aura, scale: 1.25, alpha: 0.35,
+      duration: 500, yoyo: true, repeat: -1, ease: 'Sine.easeInOut'
+    });
+  }
+
+  spawnEnemy() {
+    let x, y, tries = 0;
+    do {
+      x = Phaser.Math.Between(60, this.WORLD_W - 60);
+      y = Phaser.Math.Between(60, this.WORLD_H - 60);
+      tries++;
+    } while (Phaser.Math.Distance.Between(x, y, this.player.sprite.x, this.player.sprite.y) < 320 && tries < 30);
+
+    const hpM = 1 + (this.zone - 1) * 0.3;
+    const dmgM = 1 + (this.zone - 1) * 0.2;
+    const xpM = 1 + (this.zone - 1) * 0.35;
+    const archerChance = Math.min(0.45, 0.25 + this.zone * 0.04);
+    const e = Math.random() < archerChance ? new Archer(this, x, y) : new Enemy(this, x, y);
+    e.maxHp = Math.round(e.maxHp * hpM); e.hp = e.maxHp;
+    e.damage = Math.round(e.damage * dmgM);
+    e.xpReward = Math.round(e.xpReward * xpM);
+    if (Math.random() < 0.10) this.makeElite(e);
+    this.registerEnemy(e);
+  }
+
+  spawnBoss() {
+    let x, y, tries = 0;
+    do {
+      x = Phaser.Math.Between(100, this.WORLD_W - 100);
+      y = Phaser.Math.Between(100, this.WORLD_H - 100);
+      tries++;
+    } while (Phaser.Math.Distance.Between(x, y, this.player.sprite.x, this.player.sprite.y) < 420 && tries < 40);
+    const isDevourer = (this.zone % 2 === 0);
+    const b = isDevourer ? new Devourer(this, x, y, this.zone) : new Boss(this, x, y, this.zone);
+    this.boss = b;
+    this.bossActive = true;
+    this.registerEnemy(b);
+    this.showBanner(`${b.bossName} ПРОБУДИЛСЯ`, '#ff5a5a', 32);
+    SoundFX.bossRoar();
+    this.cameras.main.shake(300, 0.012);
+    this.updateBossBar();
+    this.refreshHud();
+  }
+
+  onEnemyKilled(e) {
+    this.kills++;
+    this.zoneKills++;
+    if (e.elite) SoundFX.eliteDie(); else SoundFX.kill();
+    if (this.enemies.length > 60) this.enemies = this.enemies.filter(x => !x.dead);
+    this.spawnDamageText(e.sprite.x, e.sprite.y - 40, `+${e.xpReward} XP`, '#7de3ff');
+    const g = e.goldReward + Phaser.Math.Between(0, 5) + this.zone * 2;
+    this.gold += g;
+    this.spawnDamageText(e.sprite.x, e.sprite.y - 58, `+${g} з.`, '#ffe27a');
+    this.player.addXp(e.xpReward);
+    if (e.elite) {
+      this.spawnDrop(e.sprite.x, e.sprite.y, genWeapon(this.player.lvl, 1));
+      this.spawnDamageText(e.sprite.x, e.sprite.y - 76, 'Элита повержена!', '#ffd34d');
+    } else if (Math.random() < 0.35) {
+      this.spawnDrop(e.sprite.x, e.sprite.y);
+    }
+    if (Math.random() < 0.12) this.spawnPotionDrop(e.sprite.x + Phaser.Math.Between(-24, 24), e.sprite.y + Phaser.Math.Between(-24, 24));
+    this.refreshHud();
+    this.saveGame();
+    this.time.delayedCall(4000, () => {
+      if (this.isOver || this.bossActive || this.portalActive) return;
+      if (this.zoneKills >= this.killsForBoss) return;
+      if (this.enemies.filter(x => !x.dead).length < 8) this.spawnEnemy();
+    });
+  }
+
+  onBossKilled(b) {
+    if (!this.bossActive) return;
+    this.kills++;
+    this.boss = null;
+    this.bossActive = false;
+    this.updateBossBar();
+    this.player.addXp(b.xpReward);
+    this.spawnDamageText(b.sprite.x, b.sprite.y - 40, `+${b.xpReward} XP`, '#7de3ff');
+    this.gold += b.goldReward;
+    this.spawnDamageText(b.sprite.x, b.sprite.y - 58, `+${b.goldReward} з.`, '#ffe27a');
+    this.spawnDrop(b.sprite.x, b.sprite.y, genWeapon(this.player.lvl, 2));
+    this.player.potions = this.maxPotions();
+    SoundFX.bossRoar();
+    this.cameras.main.flash(300, 255, 255, 255);
+    this.cameras.main.shake(300, 0.012);
+    this.spawnPortal(b.sprite.x, b.sprite.y);
+    this.showBanner('ЗОНА ЗАЧИЩЕНА', '#b26bff', 26);
+    this.refreshHud();
+    this.saveGame();
+  }
+
+  spawnPortal(x, y) {
+    this.portalActive = true;
+    let px = x, py = y, tries = 0;
+    if (Phaser.Math.Distance.Between(x, y, this.player.sprite.x, this.player.sprite.y) < 220) {
+      do {
+        px = Phaser.Math.Between(120, this.WORLD_W - 120);
+        py = Phaser.Math.Between(120, this.WORLD_H - 120);
+        tries++;
+      } while (Phaser.Math.Distance.Between(px, py, this.player.sprite.x, this.player.sprite.y) < 260 && tries < 40);
+    }
+    const p = this.portalGroup.create(px, py, 'portal');
+    p.setDepth(4);
+    p.refreshBody();
+    this.tweens.add({ targets: p, angle: 360, duration: 3000, repeat: -1 });
+    this.tweens.add({ targets: p, scale: 1.15, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    p.body.enable = false;
+    this.time.delayedCall(2000, () => { if (p.body) p.body.enable = true; });
+  }
+
+  enterPortal() {
+    if (this.changingZone || this.isOver || this.shopOpen || this.pauseOpen) return;
+    this.changingZone = true;
+    SoundFX.portal();
+    this.cameras.main.fade(400, 0, 0, 0);
+    this.time.delayedCall(450, () => this.setupZone(this.zone + 1));
+  }
+
+  setupZone(zn) {
+    if (this.shopOpen) this.closeShop();
+    if (this.pauseOpen) this.closePause();
+    this.zone = zn;
+    this.zoneKills = 0;
+    this.portalActive = false;
+    this.changingZone = false;
+
+    for (const e of this.enemies) { e.dead = true; e.deathHandled = true; e.hpBar.destroy(); e.destroySprite(); }
+    this.enemies = [];
+    this.arrows.clear(true, true);
+    this.playerShots.clear(true, true);
+    for (const pl of this.acidPools.getChildren()) { this.tweens.killTweensOf(pl); }
+    this.acidPools.clear(true, true);
+    for (const d of this.drops.getChildren()) this.tweens.killTweensOf(d);
+    this.drops.clear(true, true);
+    for (const d of this.potionDrops.getChildren()) this.tweens.killTweensOf(d);
+    this.potionDrops.clear(true, true);
+    for (const p of this.portalGroup.getChildren()) this.tweens.killTweensOf(p);
+    this.portalGroup.clear(true, true);
+
+    this.rocks.clear(true, true);
+    this.createRocks();
+
+    this.player.sprite.setPosition(800, 600);
+    this.player.sprite.setVelocity(0, 0);
+    this.player.hp = this.player.maxHp;
+    this.player.potions = this.maxPotions();
+
+    const count = Math.min(10, 5 + this.zone);
+    for (let i = 0; i < count; i++) this.spawnEnemy();
+
+    this.cameras.main.fadeIn(400);
+    this.showBanner(`ЗОНА ${zn}`, '#ffd34d', 36);
+    this.refreshHud();
+    this.saveGame();
+  }
+
+  // ---- Дропы ----
+  spawnDrop(x, y, weaponData) {
+    const w = weaponData || genWeapon(this.player.lvl);
+    const d = this.drops.create(x, y, 'drop');
+    d.setTint(RARITIES[w.r].color);
+    d.setRotation(Math.PI / 4);
+    d.setDepth(5);
+    d.weaponData = w;
+    this.tweens.add({ targets: d, y: y - 6, duration: 600, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    this.tweens.add({ targets: d, scale: 1.35, duration: 400, yoyo: true, repeat: -1 });
+  }
+
+  tryPickup(d) {
+    const w = d.weaponData;
+    this.tweens.killTweensOf(d);
+    d.destroy();
+    SoundFX.pickup();
+    this.burst(this.player.sprite.x, this.player.sprite.y, RARITIES[w.r].color, 8);
+    const p = this.player;
+    if (w.dmg > p.weapon.dmg) {
+      const old = p.weapon;
+      p.weapon = w;
+      this.spawnDamageText(p.sprite.x, p.sprite.y - 34, `${w.name} +${w.dmg}`, RARITIES[w.r].css);
+      if (old) this.spawnDrop(
+        p.sprite.x + Phaser.Math.Between(-30, 30),
+        p.sprite.y + Phaser.Math.Between(-30, 30), old);
+    } else {
+      const gain = 4 + w.r * 3;
+      p.addXp(gain);
+      this.spawnDamageText(p.sprite.x, p.sprite.y - 34, `Разобрано: +${gain} XP`, '#8a93a3');
+    }
+    this.refreshHud();
+    this.saveGame();
+  }
+
+  spawnPotionDrop(x, y) {
+    const d = this.potionDrops.create(x, y, 'potion');
+    d.setDepth(5);
+    this.tweens.add({ targets: d, y: y - 5, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+  }
+
+  pickupPotion(d) {
+    this.tweens.killTweensOf(d);
+    d.destroy();
+    SoundFX.potion();
+    const p = this.player;
+    if (p.potions < this.maxPotions()) {
+      p.potions++;
+      this.spawnDamageText(p.sprite.x, p.sprite.y - 30, '+Зелье', '#7dff8a');
+    } else {
+      p.hp = Math.min(p.maxHp, p.hp + 15);
+      this.spawnDamageText(p.sprite.x, p.sprite.y - 30, '+15 HP', '#7dff8a');
+    }
+    this.refreshHud();
+    this.saveGame();
+  }
+
+  saveGame() {
+    if (!this.player) return;
+    const p = this.player;
+    const data = {
+      lvl: p.lvl, xp: p.xp, xpNext: p.xpNext,
+      maxHp: p.maxHp, baseAttack: p.baseAttack,
+      weapon: p.weapon, kills: this.kills,
+      zone: this.zone, zoneKills: this.zoneKills,
+      potions: p.potions, gold: this.gold,
+      shopUpgrades: this.shopUpgrades
+    };
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch (e) {}
+  }
+
+  // ---- Виртуальное управление ----
+  setupTouch() {
+    this.input.once('pointerdown', () => SoundFX.unlock());
+    this.input.keyboard.once('keydown', () => SoundFX.unlock());
+
+    this.joy = { active: false, id: null, bx: 0, by: 0, tx: 0, ty: 0, x: 0, y: 0 };
+    this.joyGfx = this.add.graphics().setScrollFactor(0).setDepth(100);
+    this.btnAtk = false; this.btnDash = false; this.btnPotion = false;
+
+    this.makeButton(this.scale.width - 80, this.scale.height - 90, 44, 'АТК', () => { this.btnAtk = true; });
+    this.makeButton(this.scale.width - 180, this.scale.height - 60, 32, 'РЫВ', () => { this.btnDash = true; });
+    this.makeButton(this.scale.width - 270, this.scale.height - 110, 30, 'ЗЕЛ', () => { this.btnPotion = true; });
+
+    const abPos = [{ x: 880, y: 335 }, { x: 792, y: 382 }, { x: 700, y: 335 }];
+    this.abilities.forEach((a, i) => {
+      const pos = abPos[i];
+      a.bg = this.add.circle(pos.x, pos.y, 28, 0xffffff, 0.08)
+        .setStrokeStyle(2, 0xffffff, 0.3)
+        .setScrollFactor(0).setDepth(102).setInteractive();
+      a.txt = this.add.text(pos.x, pos.y, '?', { fontSize: '13px', color: '#5a6b80', fontStyle: 'bold' })
+        .setOrigin(0.5).setScrollFactor(0).setDepth(103);
+      a.bg.on('pointerdown', () => this.tryAbility(a));
+    });
+
+    this.input.on('pointerdown', p => {
+      if (this.shopOpen || this.pauseOpen) return;
+      if (!this.joy.active && p.x < this.scale.width * 0.5) {
+        this.joy.active = true; this.joy.id = p.id;
+        this.joy.bx = this.joy.tx = p.x; this.joy.by = this.joy.ty = p.y;
+        this.drawJoy();
+      }
+    });
+    this.input.on('pointermove', p => {
+      if (this.joy.active && p.id === this.joy.id) {
+        let dx = p.x - this.joy.bx, dy = p.y - this.joy.by;
+        const len = Math.hypot(dx, dy), max = 60;
+        if (len > max) { dx = dx / len * max; dy = dy / len * max; }
+        this.joy.x = dx / max; this.joy.y = dy / max;
+        this.joy.tx = this.joy.bx + dx; this.joy.ty = this.joy.by + dy;
+        this.drawJoy();
+      }
+    });
+    const end = p => {
+      if (this.joy.active && p.id === this.joy.id) {
+        this.joy.active = false; this.joy.x = this.joy.y = 0;
+        this.joyGfx.clear();
+      }
+    };
+    this.input.on('pointerup', end);
+    this.input.on('pointerupoutside', end);
+    this.input.on('pointercancel', end);
+  }
+
+  drawJoy() {
+    const g = this.joyGfx, j = this.joy;
+    g.clear();
+    g.fillStyle(0xffffff, 0.10).fillCircle(j.bx, j.by, 60);
+    g.fillStyle(0xffffff, 0.30).fillCircle(j.tx, j.ty, 26);
+  }
+
+  makeButton(x, y, r, label, cb) {
+    const bg = this.add.circle(x, y, r, 0xffffff, 0.10)
+      .setStrokeStyle(2, 0xffffff, 0.35)
+      .setScrollFactor(0).setDepth(102)
+      .setInteractive();
+    this.add.text(x, y, label, { fontSize: '15px', color: '#cfe0f5', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(103);
+    bg.on('pointerdown', () => { bg.setFillStyle(0xffffff, 0.25); cb(); });
+    bg.on('pointerup', () => bg.setFillStyle(0xffffff, 0.10));
+    bg.on('pointerout', () => bg.setFillStyle(0xffffff, 0.10));
+  }
+
+  // ---- HUD и эффекты ----
+  spawnDamageText(x, y, n, color) {
+    if (typeof n === 'number') SoundFX.hit();
+    const t = this.add.text(x, y, String(n), { fontSize: '18px', fontStyle: 'bold', color })
+      .setOrigin(0.5).setDepth(60);
+    this.tweens.add({ targets: t, y: y - 34, alpha: 0, duration: 600, onComplete: () => t.destroy() });
+  }
+
+  showBanner(txt, color, size, yPos) {
+    const t = this.add.text(this.scale.width / 2, yPos || 90, txt,
+      { fontSize: (size || 28) + 'px', color: color || '#ffd34d', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(150);
+    this.tweens.add({ targets: t, y: (yPos || 90) - 30, alpha: 0, duration: 1600, onComplete: () => t.destroy() });
+  }
+
+  updateBossBar() {
+    const g = this.bossBarGfx;
+    g.clear();
+    if (!this.bossActive || !this.boss) { this.bossNameText.setText(''); return; }
+    const w = this.scale.width;
+    g.fillStyle(0x000000, 0.6).fillRoundedRect(w / 2 - 220, 10, 440, 26, 6);
+    const pct = Phaser.Math.Clamp(this.boss.hp / this.boss.maxHp, 0, 1);
+    g.fillStyle(0xd84a3a).fillRoundedRect(w / 2 - 216, 14, 432 * pct, 18, 4);
+    this.bossNameText.setText(`${this.boss.bossName} · Зона ${this.zone}`);
+  }
+
+  refreshHud() {
+    const g = this.hudGfx, p = this.player;
+    g.clear();
+    g.fillStyle(0x000000, 0.5).fillRoundedRect(12, 12, 224, 26, 6);
+    const w = 216 * Phaser.Math.Clamp(p.hp / p.maxHp, 0, 1);
+    g.fillStyle(p.hp > 30 ? 0x46c05a : 0xd84a3a).fillRoundedRect(16, 16, w, 18, 4);
+    this.hudText.setText(`HP ${p.hp}/${p.maxHp}`);
+    g.fillStyle(0x000000, 0.5).fillRoundedRect(12, 42, 224, 10, 5);
+    g.fillStyle(0x3fa9ff).fillRoundedRect(14, 44, 220 * Phaser.Math.Clamp(p.xp / p.xpNext, 0, 1), 6, 3);
+
+    this.killsText.setText(`Убито врагов: ${this.kills}`);
+    this.potionsText.setText(`Зелья: ${p.potions}/${this.maxPotions()}`);
+    this.goldText.setText(`Золото: ${this.gold}`);
+    if (this.bossActive) this.objText.setText('');
+    else if (this.portalActive) this.objText.setText('Входи в портал!');
+    else this.objText.setText(`Зона ${this.zone} · До босса: ${Math.max(0, this.killsForBoss - this.zoneKills)}`);
+    const wp = p.weapon;
+    this.weaponText.setText(`${wp.name} +${wp.dmg}`).setColor(RARITIES[wp.r].css);
+    this.dmgText.setText(`Ур. ${p.lvl} · Урон ${p.totalDamage()}`);
+  }
+
+  gameOver() {
+    this.isOver = true;
+    SoundFX.gameover();
+    this.physics.pause();
+    const w = this.scale.width, h = this.scale.height;
+    this.add.rectangle(w / 2, h / 2, w, h, 0x000000, 0.65).setScrollFactor(0).setDepth(200);
+    this.add.text(w / 2, h / 2 - 48, 'ВЫ ПАЛИ В БОЮ', { fontSize: '34px', color: '#ff5a5a', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(201);
+    this.add.text(w / 2, h / 2 - 10, `Зона ${this.zone} · Уровень ${this.player.lvl} · Врагов: ${this.kills} · Золото: ${this.gold}`,
+      { fontSize: '16px', color: '#9fb3c8' }).setOrigin(0.5).setScrollFactor(0).setDepth(201);
+    this.add.text(w / 2, h / 2 + 14, 'Прогресс сохранён', { fontSize: '13px', color: '#5fd35f' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(201);
+    const btn = this.add.text(w / 2, h / 2 + 52, '— ПРОДОЛЖИТЬ —', { fontSize: '20px', color: '#ffd34d', fontStyle: 'bold' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(201).setInteractive({ useHandCursor: true });
+    btn.on('pointerdown', () => this.scene.restart());
+    const reset = this.add.text(w / 2, h / 2 + 88, 'сбросить прогресс', { fontSize: '13px', color: '#7a8799' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(201).setInteractive({ useHandCursor: true });
+    reset.on('pointerdown', () => {
+      try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
+      this.scene.restart();
+    });
+    const menuBtn = this.add.text(w / 2, h / 2 + 116, 'в главное меню', { fontSize: '13px', color: '#7a8799' })
+      .setOrigin(0.5).setScrollFactor(0).setDepth(201).setInteractive({ useHandCursor: true });
+    menuBtn.on('pointerdown', () => this.scene.start('menu'));
+  }
+
+  makeTextures() {
+    const g = this.make.graphics({ add: false });
+    g.fillStyle(0x3f8cff); g.fillRoundedRect(2, 2, 28, 28, 8);
+    g.fillStyle(0xbfdcff); g.fillRect(21, 11, 9, 10);
+    g.generateTexture('player', 32, 32); g.clear();
+    g.fillStyle(0xd84a3a); g.fillRoundedRect(2, 2, 28, 28, 8);
+    g.fillStyle(0x3a0f0a); g.fillRect(20, 9, 7, 7);
+    g.generateTexture('enemy', 32, 32); g.clear();
+    g.fillStyle(0x9b59d0); g.fillRoundedRect(2, 2, 28, 28, 8);
+    g.fillStyle(0x9be7ff); g.fillRect(20, 9, 7, 7);
+    g.generateTexture('archer', 32, 32); g.clear();
+    g.fillStyle(0x7a1f3d); g.fillRoundedRect(2, 2, 44, 44, 10);
+    g.fillStyle(0xffd34d); g.fillRect(28, 15, 10, 10);
+    g.fillStyle(0x3a0f1e); g.fillRect(31, 18, 4, 4);
+    g.fillStyle(0x5c1730); g.fillTriangle(8, 8, 16, 8, 12, 0);
+    g.fillTriangle(32, 8, 40, 8, 36, 0);
+    g.generateTexture('boss', 48, 48); g.clear();
+    // Пожиратель — зелёный змей с челюстями
+    g.fillStyle(0x2f8a3e); g.fillRoundedRect(2, 6, 44, 34, 12);
+    g.fillStyle(0x1d5c28); g.fillRoundedRect(2, 10, 44, 26, 10);
+    g.fillStyle(0xd8ffe8); g.fillRect(32, 12, 8, 8);   // глаз
+    g.fillStyle(0x0a2812); g.fillRect(34, 14, 4, 4);
+    g.fillStyle(0xd8ffe8); g.fillTriangle(40, 34, 44, 42, 36, 42); // зуб
+    g.fillStyle(0x7dff5a); g.fillTriangle(28, 6, 34, 0, 22, 6);   // рог
+    g.generateTexture('devourer', 48, 48); g.clear();
+    // кислотная лужа
+    g.fillStyle(0xffffff); g.fillCircle(32, 32, 30);
+    g.fillStyle(0x000000, 0); g.fillCircle(22, 24, 8);
+    g.generateTexture('pool', 64, 64); g.clear();
+    g.fillStyle(0xffffff); g.fillRect(0, 0, 14, 4);
+    g.generateTexture('arrow', 14, 4); g.clear();
+    g.fillStyle(0xffa23e); g.fillCircle(6, 6, 6);
+    g.fillStyle(0xffe27a); g.fillCircle(6, 6, 3);
+    g.generateTexture('fireball', 12, 12); g.clear();
+    g.fillStyle(0xffffff); g.fillRect(0, 0, 12, 12);
+    g.generateTexture('drop', 12, 12); g.clear();
+    g.fillStyle(0x37c871); g.fillRoundedRect(3, 4, 8, 9, 2);
+    g.fillStyle(0xd8ffe8); g.fillRect(5, 1, 4, 3);
+    g.generateTexture('potion', 14, 14); g.clear();
+    g.lineStyle(4, 0xb26bff); g.strokeCircle(32, 32, 26);
+    g.fillStyle(0xb26bff, 0.25); g.fillCircle(32, 32, 24);
+    g.fillStyle(0xffffff, 0.8); g.fillCircle(32, 32, 6);
+    g.generateTexture('portal', 64, 64); g.clear();
+    g.fillStyle(0x8a93a3); g.fillCircle(20, 20, 19);
+    g.fillStyle(0x6b7280); g.fillCircle(14, 13, 7);
+    g.generateTexture('rock', 40, 40); g.clear();
+    g.fillStyle(0xffffff); g.fillCircle(4, 4, 4);
+    g.generateTexture('dot', 8, 8); g.clear();
+    g.fillStyle(0x000000); g.fillEllipse(16, 8, 30, 14);
+    g.generateTexture('shadow', 32, 16); g.clear();
+    g.lineStyle(3, 0xffffff); g.strokeCircle(24, 24, 21);
+    g.generateTexture('ring', 48, 48); g.clear();
+    g.fillStyle(0x141a26); g.fillRect(0, 0, 64, 64);
+    g.lineStyle(1, 0x1d2635); g.strokeRect(0.5, 0.5, 63, 63);
+    g.generateTexture('tile', 64, 64);
+    g.destroy();
+  }
+}
+// ==== КОНЕЦ ЧАСТИ 5 ====// ======================== ГЛАВНОЕ МЕНЮ ========================
+class MenuScene extends Phaser.Scene {
+  constructor() { super('menu'); }
+
+  create() {
+    const w = this.scale.width, h = this.scale.height;
+    this.input.once('pointerdown', () => SoundFX.unlock());
+
+    this.add.rectangle(0, 0, w, h, 0x0b0e14).setOrigin(0);
+    for (let i = 0; i < 26; i++) {
+      const d = this.add.circle(Phaser.Math.Between(0, w), Phaser.Math.Between(0, h),
+        Phaser.Math.Between(1, 3), 0x3f8cff, Phaser.Math.FloatBetween(0.15, 0.45));
+      this.tweens.add({
+        targets: d, y: d.y - Phaser.Math.Between(50, 130),
+        alpha: 0, duration: Phaser.Math.Between(2200, 5200),
+        repeat: -1, delay: Phaser.Math.Between(0, 3000)
+      });
+    }
+
+    const title = this.add.text(w / 2, 105, 'SHADOW LANDS', { fontSize: '54px', color: '#ffd34d', fontStyle: 'bold' })
+      .setOrigin(0.5);
+    this.tweens.add({ targets: title, scale: 1.04, duration: 1300, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+    this.add.text(w / 2, 158, 'Тёмные земли ждут героя', { fontSize: '16px', color: '#7a8799' }).setOrigin(0.5);
+
+    const save = loadSave();
+    if (save) {
+      this.add.text(w / 2, 200, `Сохранение: Уровень ${save.lvl} · Зона ${save.zone || 1} · Убито врагов: ${save.kills || 0}`,
+        { fontSize: '14px', color: '#5fd35f' }).setOrigin(0.5);
+    }
+
+        this.menuButton(w / 2, 268, 270, 54, save ? 'ПРОДОЛЖИТЬ' : 'ИГРАТЬ', () => {
+      goFullscreen();
+      this.scene.start('game');
+    });
+
+    const sndBtn = this.menuButton(w / 2, 340, 270, 46, SoundFX.muted ? 'ЗВУК: ВЫКЛ' : 'ЗВУК: ВКЛ', () => {
+      SoundFX.setMuted(!SoundFX.muted);
+      sndBtn.setLabel(SoundFX.muted ? 'ЗВУК: ВЫКЛ' : 'ЗВУК: ВКЛ');
+    });
+
+    this.resetArmed = false;
+    const resetBtn = this.menuButton(w / 2, 402, 270, 46, 'СБРОСИТЬ ПРОГРЕСС', () => {
+      if (!this.resetArmed) {
+        this.resetArmed = true;
+        resetBtn.setLabel('ТОЧНО? НАЖМИ ЕЩЁ РАЗ');
+        this.time.delayedCall(2500, () => {
+          if (this.resetArmed) { this.resetArmed = false; resetBtn.setLabel('СБРОСИТЬ ПРОГРЕСС'); }
+        });
+      } else {
+        try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
+        this.scene.restart();
+      }
+    }, 0x4a2222, 0x6b2f2f);
+
+    this.add.text(w / 2, h - 20, 'v1.1 · Два босса · Элитные враги · Левая половина — движение',
+      { fontSize: '12px', color: '#4a5668' }).setOrigin(0.5);
+  }
+
+  menuButton(x, y, bw, bh, label, cb, bgColor, pressColor) {
+    const normal = bgColor || 0x2a3a55;
+    const pressed = pressColor || 0x3a4f73;
+    const bg = this.add.rectangle(x, y, bw, bh, normal, 1)
+      .setStrokeStyle(2, 0x4a5f83)
+      .setInteractive({ useHandCursor: true });
+    const txt = this.add.text(x, y, label, { fontSize: '17px', color: '#e8eef7', fontStyle: 'bold' }).setOrigin(0.5);
+    bg.on('pointerdown', () => { bg.setFillStyle(pressed, 1); cb(); });
+    bg.on('pointerup', () => bg.setFillStyle(normal, 1));
+    bg.on('pointerout', () => bg.setFillStyle(normal, 1));
+    return { setLabel: (s) => txt.setText(s) };
+  }
+}
+
+// ======================== ЗАПУСК ========================
+const config = {
+  type: Phaser.AUTO,
+  width: 960,
+  height: 540,
+  backgroundColor: '#10141f',
+  input: { activePointers: 3 },
+  physics: { default: 'arcade', arcade: { debug: false } },
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+  scene: [MenuScene, GameScene]
+};
+new Phaser.Game(config);
+</script>
+</body>
+</html>
