@@ -6,7 +6,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
- <link rel="manifest" href="manifest.json">
+<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0b0e14">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -15,7 +15,7 @@
 <style>
   html, body { margin:0; padding:0; background:#0b0e14; overflow:hidden; height:100%; touch-action:none; }
   canvas { display:block; margin:auto; }
-    #rotate { position:fixed; inset:0; background:#0b0e14; z-index:99998;
+  #rotate { position:fixed; inset:0; background:#0b0e14; z-index:99998;
     display:none; flex-direction:column; align-items:center; justify-content:center;
     color:#ffd34d; font:bold 20px sans-serif; text-align:center; }
   #rotate .arrow { font-size:60px; animation:spin 1.6s ease-in-out infinite; }
@@ -24,7 +24,7 @@
 </style>
 </head>
 <body>
-  <div id="rotate"><div class="arrow">&#8635;</div><div>ПОВЕРНИ УСТРОЙСТВО<br>ГОРИЗОНТАЛЬНО</div></div>
+<div id="rotate"><div class="arrow">&#8635;</div><div>ПОВЕРНИ УСТРОЙСТВО<br>ГОРИЗОНТАЛЬНО</div></div>
 <script>
 // --- ЛОВЕЦ ОШИБОК (отладка) ---
 window.onerror = function (msg, src, line, col) {
@@ -38,11 +38,14 @@ window.onerror = function (msg, src, line, col) {
   box.textContent = 'ОШИБКА: ' + msg + '\nСтрока: ' + line + ':' + col;
   return false;
 };
+
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-// ======================== ДАННЫЕ ========================
+
+// ======================== ДАННЫЕ И НАСТРОЙКИ ========================
 const SAVE_KEY = 'sl_save1';
+const SETTINGS_KEY = 'sl_settings';
 
 const RARITIES = [
   { name:'Обычный',     color:0xc7c7c7, css:'#c7c7c7', w:55, bonus:0 },
@@ -82,6 +85,20 @@ function loadSave() {
   } catch (e) { return null; }
 }
 
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+    if (s && typeof s === 'object') {
+      return { portalArrow: s.portalArrow !== false, tutorials: s.tutorials !== false };
+    }
+  } catch (e) {}
+  return { portalArrow: true, tutorials: true };
+}
+
+function saveSettings(s) {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch (e) {}
+}
+
 // ======================== ЗВУКИ ========================
 const SoundFX = {
   ctx: null, master: null, noiseBuf: null, musicOsc: null,
@@ -112,6 +129,9 @@ const SoundFX = {
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
     this.startMusic();
   },
+
+  suspend() { if (this.ctx && this.ctx.state === 'running') this.ctx.suspend(); },
+  resume()  { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
 
   tone(freq, dur, type, vol, freqEnd, delay) {
     if (!this.ctx) return;
@@ -171,7 +191,8 @@ const SoundFX = {
     this.musicOsc = o;
   }
 };
-// ======================== ЭКРАН И ЗВУК ПРИ СВОРАЧИВАНИИ ========================
+
+// ======================== ЭКРАН ========================
 function goFullscreen() {
   try {
     const el = document.documentElement;
@@ -189,20 +210,11 @@ function goFullscreen() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!SoundFX.ctx) return;
-  if (document.hidden) {
-    if (SoundFX.ctx.state === 'running') SoundFX.ctx.suspend();
-  } else {
-    if (SoundFX.ctx.state === 'suspended') SoundFX.ctx.resume();
-  }
+  if (document.hidden) SoundFX.suspend(); else SoundFX.resume();
 });
-window.addEventListener('blur', () => {
-  if (SoundFX.ctx && SoundFX.ctx.state === 'running') SoundFX.ctx.suspend();
-});
-window.addEventListener('focus', () => {
-  if (SoundFX.ctx && SoundFX.ctx.state === 'suspended' && !document.hidden) SoundFX.ctx.resume();
-});
-// ======================== ИГРОК ========================
+window.addEventListener('blur', () => SoundFX.suspend());
+window.addEventListener('focus', () => { if (!document.hidden) SoundFX.resume(); });
+// ==== КОНЕЦ ЧАСТИ 1 ====// ======================== ИГРОК ========================
 class Player {
   constructor(scene, x, y, save) {
     this.scene = scene;
@@ -295,7 +307,6 @@ class Player {
       const dir = v.lengthSq() > 0.0025 ? v.clone().normalize() : this.facing.clone();
       this.tryDash(time, dir);
     }
-    // кислотные лужи
     if (time > this.acidTickCd) {
       for (const pl of this.scene.acidPools.getChildren()) {
         if (!pl.active || pl.hp === undefined) continue;
@@ -342,7 +353,6 @@ class Player {
         ar.destroy();
       }
     }
-    // взмах разбивает кислотные лужи
     for (const pl of this.scene.acidPools.getChildren()) {
       if (!pl.active || pl.hp === undefined) continue;
       const to = new Phaser.Math.Vector2(pl.x - s.x, pl.y - s.y);
@@ -389,7 +399,7 @@ class Player {
     if (this.hp <= 0) this.scene.gameOver();
   }
 }
-// ==== КОНЕЦ ЧАСТИ 1 ====// ======================== БАЗОВЫЙ ВРАГ ========================
+// ==== КОНЕЦ ЧАСТИ 2 ====// ======================== БАЗОВЫЙ ВРАГ ========================
 class Fighter {
   constructor(scene, x, y, texture) {
     this.scene = scene;
@@ -565,7 +575,7 @@ class Archer extends Fighter {
     });
   }
 }
-// ==== КОНЕЦ ЧАСТИ 2 ====// ======================== БОСС 1: СТРАЖ ТЕНЕЙ ========================
+// ==== КОНЕЦ ЧАСТИ 3 ====// ======================== БОСС 1: СТРАЖ ТЕНЕЙ ========================
 class Boss extends Fighter {
   constructor(scene, x, y, zone) {
     super(scene, x, y, 'boss');
@@ -726,13 +736,13 @@ class Devourer extends Fighter {
     this.maxHp = 260 + (zone - 1) * 150;
     this.hp = this.maxHp;
     this.speed = 80;
-    this.damage = 12 + zone * 2;    // укус
-    this.spitDmg = 9 + zone * 2;    // кислота
+    this.damage = 12 + zone * 2;
+    this.spitDmg = 9 + zone * 2;
     this.xpReward = 100 + zone * 30;
     this.goldReward = 60 + zone * 12;
     this.swipeCd = 0;
     this.specialCd = scene.time.now + 1200;
-    this.burstSpit = false; // фаза ярости
+    this.burstSpit = false;
   }
 
   drawHpBar() {}
@@ -781,7 +791,6 @@ class Devourer extends Fighter {
   trySpecial(time, player) {
     if (time < this.specialCd) return;
     this.specialCd = time + (this.burstSpit ? 2600 : 3800);
-    // 40% — призыв миньонов, 60% — плевок кислотой
     if (Math.random() < 0.4) this.summon(player); else this.spit(player);
   }
 
@@ -854,7 +863,7 @@ class Devourer extends Fighter {
     this.scene.onBossKilled(this);
   }
 }
-// ==== КОНЕЦ ЧАСТИ 3 ====// ======================== СЦЕНА ИГРЫ ========================
+// ==== КОНЕЦ ЧАСТИ 4 ====// ======================== СЦЕНА ИГРЫ ========================
 class GameScene extends Phaser.Scene {
   constructor() { super('game'); }
 
@@ -867,11 +876,14 @@ class GameScene extends Phaser.Scene {
     this.zoneKills = save ? (save.zoneKills || 0) : 0;
     this.gold = (save && save.gold != null) ? save.gold : 0;
     this.shopUpgrades = (save && save.shopUpgrades) ? save.shopUpgrades : { str: 0, vit: 0, sharp: 0 };
+    this.settings = loadSettings();
     this.killsForBoss = 10;
     this.boss = null; this.bossActive = false;
     this.portalActive = false; this.changingZone = false;
     this.shopOpen = false; this.shopEls = null;
     this.pauseOpen = false; this.pauseEls = null;
+    this.portalArrowImg = null;
+    this.displayGold = this.gold; // для плавного счётчика золота
 
     this.abilities = [
       { id:'whirl', label:'ВИХ', fullName:'Вихрь',            unlock:2, cd:6000,  last:-99999, color:0x9be7ff, css:'#9be7ff', use: () => this.useWhirlwind() },
@@ -957,12 +969,13 @@ class GameScene extends Phaser.Scene {
     this.bossNameText = this.add.text(this.scale.width / 2, 22, '', { fontSize: '13px', color: '#fff', fontStyle: 'bold' })
       .setOrigin(0.5).setScrollFactor(0).setDepth(102);
     this.createVignette();
-        // свернули игру — автоматически пауза
+    this.refreshHud();
+    this.updateAbilityButtons(this.time.now);
+
+    // автопауза при сворачивании вкладки
     this.game.events.on('hidden', () => {
       if (!this.isOver && !this.shopOpen && !this.pauseOpen) this.openPause();
     });
-    this.refreshHud();
-    this.updateAbilityButtons(this.time.now);
 
     this.add.text(this.scale.width / 2, this.scale.height - 12,
       'АТК — удар · РЫВ · ЗЕЛ — зелье · Умения справа · II — пауза',
@@ -990,6 +1003,16 @@ class GameScene extends Phaser.Scene {
     if (this.isOver || this.shopOpen || this.pauseOpen) return;
 
     if (this.playerShadow) this.playerShadow.setPosition(this.player.sprite.x, this.player.sprite.y + 14);
+
+    // плавный счётчик золота
+    if (this.displayGold !== this.gold) {
+      const diff = this.gold - this.displayGold;
+      if (Math.abs(diff) <= 1) this.displayGold = this.gold;
+      else this.displayGold += Math.sign(diff) * Math.max(1, Math.round(Math.abs(diff) / 4));
+      this.goldText.setText(`Золото: ${this.displayGold}`);
+    }
+
+    this.updatePortalArrow();
 
     if (!this.bossActive && !this.portalActive && this.zoneKills >= this.killsForBoss) {
       this.spawnBoss();
@@ -1025,6 +1048,31 @@ class GameScene extends Phaser.Scene {
       if (time > sh.lifeUntil) sh.destroy();
     }
     this.updateAbilityButtons(time);
+  }
+
+  // ---- Стрелка к порталу ----
+  updatePortalArrow() {
+    const show = this.settings.portalArrow && this.portalActive && !this.shopOpen && !this.pauseOpen;
+    if (!show) {
+      if (this.portalArrowImg) { this.portalArrowImg.destroy(); this.portalArrowImg = null; }
+      return;
+    }
+    const portal = this.portalGroup.getChildren().find(p => p.active);
+    if (!portal) return;
+    const p = this.player.sprite;
+    const a = Phaser.Math.Angle.Between(p.x, p.y, portal.x, portal.y);
+    const dist = Phaser.Math.Distance.Between(p.x, p.y, portal.x, portal.y);
+    if (!this.portalArrowImg || !this.portalArrowImg.scene) {
+      this.portalArrowImg = this.add.image(0, 0, 'arrowDir')
+        .setDepth(90).setTint(0xb26bff);
+      this.tweens.add({
+        targets: this.portalArrowImg, scale: 1.3, alpha: 0.5,
+        duration: 400, yoyo: true, repeat: -1, ease: 'Sine.easeInOut'
+      });
+    }
+    this.portalArrowImg.setPosition(p.x + Math.cos(a) * 58, p.y + Math.sin(a) * 58);
+    this.portalArrowImg.setRotation(a);
+    this.portalArrowImg.setAlpha(Phaser.Math.Clamp(dist / 300, 0.3, 1));
   }
 
   // ---- Эффекты ----
@@ -1114,7 +1162,6 @@ class GameScene extends Phaser.Scene {
     pl.refreshBody();
     this.tweens.add({ targets: pl, scale: 1.3, duration: 260, onUpdate: () => pl.refreshBody() });
     this.tweens.add({ targets: pl, alpha: 0.4, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-    // сама исчезает через 6 секунд
     this.time.delayedCall(6000, () => { if (pl.active) this.removePool(pl); });
   }
 
@@ -1162,7 +1209,6 @@ class GameScene extends Phaser.Scene {
         this.spawnDamageText(e.sprite.x, e.sprite.y - 24, dmg, '#9be7ff');
       }
     }
-    // вихрь сносит кислотные лужи рядом
     for (const pl of this.acidPools.getChildren()) {
       if (!pl.active || pl.hp === undefined) continue;
       if (Phaser.Math.Distance.Between(s.x, s.y, pl.x, pl.y) <= 140) this.removePool(pl);
@@ -1226,7 +1272,7 @@ class GameScene extends Phaser.Scene {
       }
     }
   }
-// ==== КОНЕЦ ЧАСТИ 4 ====  // ---- Лавка ----
+// ==== КОНЕЦ ЧАСТИ 5 ====  // ---- Лавка ----
   shopCost(id) {
     const u = this.shopUpgrades;
     if (id === 'str') return 40 + 30 * u.str;
@@ -1445,7 +1491,7 @@ class GameScene extends Phaser.Scene {
     this.cameras.main.flash(300, 255, 255, 255);
     this.cameras.main.shake(300, 0.012);
     this.spawnPortal(b.sprite.x, b.sprite.y);
-    this.showBanner('ЗОНА ЗАЧИЩЕНА', '#b26bff', 26);
+    this.showBanner('ЗОНА ЗАЧИЩЕНА · ИДИ К ПОРТАЛУ', '#b26bff', 26);
     this.refreshHud();
     this.saveGame();
   }
@@ -1484,6 +1530,8 @@ class GameScene extends Phaser.Scene {
     this.zoneKills = 0;
     this.portalActive = false;
     this.changingZone = false;
+
+    if (this.portalArrowImg) { this.portalArrowImg.destroy(); this.portalArrowImg = null; }
 
     for (const e of this.enemies) { e.dead = true; e.deathHandled = true; e.hpBar.destroy(); e.destroySprite(); }
     this.enemies = [];
@@ -1678,9 +1726,11 @@ class GameScene extends Phaser.Scene {
     g.clear();
     if (!this.bossActive || !this.boss) { this.bossNameText.setText(''); return; }
     const w = this.scale.width;
-    g.fillStyle(0x000000, 0.6).fillRoundedRect(w / 2 - 220, 10, 440, 26, 6);
     const pct = Phaser.Math.Clamp(this.boss.hp / this.boss.maxHp, 0, 1);
-    g.fillStyle(0xd84a3a).fillRoundedRect(w / 2 - 216, 14, 432 * pct, 18, 4);
+    const low = pct < 0.25;
+    const blink = low ? (Math.floor(this.time.now / 250) % 2 === 0 ? 1 : 0.6) : 1;
+    g.fillStyle(0x000000, 0.6).fillRoundedRect(w / 2 - 220, 10, 440, 26, 6);
+    g.fillStyle(low ? 0xff5a3c : 0xd84a3a, blink).fillRoundedRect(w / 2 - 216, 14, 432 * pct, 18, 4);
     this.bossNameText.setText(`${this.boss.bossName} · Зона ${this.zone}`);
   }
 
@@ -1696,7 +1746,7 @@ class GameScene extends Phaser.Scene {
 
     this.killsText.setText(`Убито врагов: ${this.kills}`);
     this.potionsText.setText(`Зелья: ${p.potions}/${this.maxPotions()}`);
-    this.goldText.setText(`Золото: ${this.gold}`);
+    this.goldText.setText(`Золото: ${this.displayGold != null ? this.displayGold : this.gold}`);
     if (this.bossActive) this.objText.setText('');
     else if (this.portalActive) this.objText.setText('Входи в портал!');
     else this.objText.setText(`Зона ${this.zone} · До босса: ${Math.max(0, this.killsForBoss - this.zoneKills)}`);
@@ -1748,15 +1798,13 @@ class GameScene extends Phaser.Scene {
     g.fillStyle(0x5c1730); g.fillTriangle(8, 8, 16, 8, 12, 0);
     g.fillTriangle(32, 8, 40, 8, 36, 0);
     g.generateTexture('boss', 48, 48); g.clear();
-    // Пожиратель — зелёный змей с челюстями
     g.fillStyle(0x2f8a3e); g.fillRoundedRect(2, 6, 44, 34, 12);
     g.fillStyle(0x1d5c28); g.fillRoundedRect(2, 10, 44, 26, 10);
-    g.fillStyle(0xd8ffe8); g.fillRect(32, 12, 8, 8);   // глаз
+    g.fillStyle(0xd8ffe8); g.fillRect(32, 12, 8, 8);
     g.fillStyle(0x0a2812); g.fillRect(34, 14, 4, 4);
-    g.fillStyle(0xd8ffe8); g.fillTriangle(40, 34, 44, 42, 36, 42); // зуб
-    g.fillStyle(0x7dff5a); g.fillTriangle(28, 6, 34, 0, 22, 6);   // рог
+    g.fillStyle(0xd8ffe8); g.fillTriangle(40, 34, 44, 42, 36, 42);
+    g.fillStyle(0x7dff5a); g.fillTriangle(28, 6, 34, 0, 22, 6);
     g.generateTexture('devourer', 48, 48); g.clear();
-    // кислотная лужа
     g.fillStyle(0xffffff); g.fillCircle(32, 32, 30);
     g.fillStyle(0x000000, 0); g.fillCircle(22, 24, 8);
     g.generateTexture('pool', 64, 64); g.clear();
@@ -1783,13 +1831,16 @@ class GameScene extends Phaser.Scene {
     g.generateTexture('shadow', 32, 16); g.clear();
     g.lineStyle(3, 0xffffff); g.strokeCircle(24, 24, 21);
     g.generateTexture('ring', 48, 48); g.clear();
+    g.fillStyle(0xffffff);
+    g.fillTriangle(2, 10, 22, 0, 22, 20);
+    g.generateTexture('arrowDir', 24, 20); g.clear();
     g.fillStyle(0x141a26); g.fillRect(0, 0, 64, 64);
     g.lineStyle(1, 0x1d2635); g.strokeRect(0.5, 0.5, 63, 63);
     g.generateTexture('tile', 64, 64);
     g.destroy();
   }
 }
-// ==== КОНЕЦ ЧАСТИ 5 ====// ======================== ГЛАВНОЕ МЕНЮ ========================
+// ==== КОНЕЦ ЧАСТИ 6 ====// ======================== ГЛАВНОЕ МЕНЮ ========================
 class MenuScene extends Phaser.Scene {
   constructor() { super('menu'); }
 
@@ -1808,29 +1859,37 @@ class MenuScene extends Phaser.Scene {
       });
     }
 
-    const title = this.add.text(w / 2, 105, 'SHADOW LANDS', { fontSize: '54px', color: '#ffd34d', fontStyle: 'bold' })
+    const title = this.add.text(w / 2, 95, 'SHADOW LANDS', { fontSize: '52px', color: '#ffd34d', fontStyle: 'bold' })
       .setOrigin(0.5);
     this.tweens.add({ targets: title, scale: 1.04, duration: 1300, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-    this.add.text(w / 2, 158, 'Тёмные земли ждут героя', { fontSize: '16px', color: '#7a8799' }).setOrigin(0.5);
+    this.add.text(w / 2, 146, 'Тёмные земли ждут героя', { fontSize: '16px', color: '#7a8799' }).setOrigin(0.5);
 
     const save = loadSave();
     if (save) {
-      this.add.text(w / 2, 200, `Сохранение: Уровень ${save.lvl} · Зона ${save.zone || 1} · Убито врагов: ${save.kills || 0}`,
+      this.add.text(w / 2, 182, `Сохранение: Ур. ${save.lvl} · Зона ${save.zone || 1} · Убито: ${save.kills || 0}`,
         { fontSize: '14px', color: '#5fd35f' }).setOrigin(0.5);
     }
 
-        this.menuButton(w / 2, 268, 270, 54, save ? 'ПРОДОЛЖИТЬ' : 'ИГРАТЬ', () => {
+    this.menuButton(w / 2, 244, 300, 50, save ? 'ПРОДОЛЖИТЬ' : 'ИГРАТЬ', () => {
       goFullscreen();
       this.scene.start('game');
     });
 
-    const sndBtn = this.menuButton(w / 2, 340, 270, 46, SoundFX.muted ? 'ЗВУК: ВЫКЛ' : 'ЗВУК: ВКЛ', () => {
+    const settings = loadSettings();
+    const sndBtn = this.menuButton(w / 2, 306, 300, 42, SoundFX.muted ? 'ЗВУК: ВЫКЛ' : 'ЗВУК: ВКЛ', () => {
       SoundFX.setMuted(!SoundFX.muted);
       sndBtn.setLabel(SoundFX.muted ? 'ЗВУК: ВЫКЛ' : 'ЗВУК: ВКЛ');
     });
 
+    const arrowBtn = this.menuButton(w / 2, 358, 300, 42,
+      settings.portalArrow ? 'СТРЕЛКА К ПОРТАЛУ: ВКЛ' : 'СТРЕЛКА К ПОРТАЛУ: ВЫКЛ', () => {
+        settings.portalArrow = !settings.portalArrow;
+        saveSettings(settings);
+        arrowBtn.setLabel(settings.portalArrow ? 'СТРЕЛКА К ПОРТАЛУ: ВКЛ' : 'СТРЕЛКА К ПОРТАЛУ: ВЫКЛ');
+      });
+
     this.resetArmed = false;
-    const resetBtn = this.menuButton(w / 2, 402, 270, 46, 'СБРОСИТЬ ПРОГРЕСС', () => {
+    const resetBtn = this.menuButton(w / 2, 410, 300, 42, 'СБРОСИТЬ ПРОГРЕСС', () => {
       if (!this.resetArmed) {
         this.resetArmed = true;
         resetBtn.setLabel('ТОЧНО? НАЖМИ ЕЩЁ РАЗ');
@@ -1843,7 +1902,7 @@ class MenuScene extends Phaser.Scene {
       }
     }, 0x4a2222, 0x6b2f2f);
 
-    this.add.text(w / 2, h - 20, 'v1.1 · Два босса · Элитные враги · Левая половина — движение',
+    this.add.text(w / 2, h - 16, 'v1.2 · Два босса · Элита · Полный экран при старте',
       { fontSize: '12px', color: '#4a5668' }).setOrigin(0.5);
   }
 
@@ -1853,15 +1912,14 @@ class MenuScene extends Phaser.Scene {
     const bg = this.add.rectangle(x, y, bw, bh, normal, 1)
       .setStrokeStyle(2, 0x4a5f83)
       .setInteractive({ useHandCursor: true });
-    const txt = this.add.text(x, y, label, { fontSize: '17px', color: '#e8eef7', fontStyle: 'bold' }).setOrigin(0.5);
+    const txt = this.add.text(x, y, label, { fontSize: '16px', color: '#e8eef7', fontStyle: 'bold' }).setOrigin(0.5);
     bg.on('pointerdown', () => { bg.setFillStyle(pressed, 1); cb(); });
     bg.on('pointerup', () => bg.setFillStyle(normal, 1));
     bg.on('pointerout', () => bg.setFillStyle(normal, 1));
     return { setLabel: (s) => txt.setText(s) };
   }
 }
-
-// ======================== ЗАПУСК ========================
+// ==== КОНЕЦ ЧАСТИ 7 ====// ======================== ЗАПУСК ========================
 const config = {
   type: Phaser.AUTO,
   width: 960,
@@ -1875,4 +1933,4 @@ const config = {
 new Phaser.Game(config);
 </script>
 </body>
-</html>
+ </html>
